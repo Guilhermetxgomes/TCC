@@ -2,41 +2,54 @@ package server_test
 
 import (
 	"bytes"
-	"context"
-	"database/sql"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Guilhermetxgomes/TCC/internal/alpr"
 	"github.com/Guilhermetxgomes/TCC/internal/server"
+	"github.com/Guilhermetxgomes/TCC/internal/token"
+	"github.com/google/uuid"
 )
 
-// stubDB implementa a interface mínima usada pelos handlers via storage.
-// Como os handlers chamam storage.InsertRecord(ctx, db, r), precisamos de
-// um *sql.DB real ou substituir a injeção. Aqui usamos nil e verificamos
-// apenas os caminhos que não chegam ao banco (validações de request).
-// Para o caminho feliz usamos um banco SQLite em memória como exercício
-// isolado — mas como o projeto usa PostgreSQL, testamos apenas as
-// validações de entrada sem dependência de banco.
-
-func newTestServer(t *testing.T) (*server.Server, *http.ServeMux) {
+func newTestServer(t *testing.T) (*server.Server, *http.ServeMux, *ecdsa.PrivateKey) {
 	t.Helper()
-	// nil DBs — os handlers só chegarão ao banco se a request for válida.
-	// Testes abaixo cobrem os casos de rejeição antes do banco.
-	srv := server.New(nil, nil)
+	judgeSK, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// nil DBs — testes cobrem validações de request antes do banco
+	srv := server.New(nil, nil, &judgeSK.PublicKey)
 	mux := http.NewServeMux()
 	srv.Routes(mux)
-	return srv, mux
+	return srv, mux, judgeSK
 }
 
+func bearerToken(t *testing.T, sk *ecdsa.PrivateKey, st token.SearchType) string {
+	t.Helper()
+	tok := token.AuthToken{
+		TokenID:    uuid.New().String(),
+		SearchType: st,
+		DecodedBy:  "teste",
+		ExpiresAt:  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+	}
+	if err := token.Issue(&tok, sk); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(tok)
+	return "Bearer " + base64.StdEncoding.EncodeToString(raw)
+}
+
+// ----- /health -----
+
 func TestHealthOK(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux, _ := newTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
-
 	if rr.Code != http.StatusOK {
 		t.Fatalf("esperado 200, got %d", rr.Code)
 	}
@@ -47,8 +60,10 @@ func TestHealthOK(t *testing.T) {
 	}
 }
 
+// ----- POST /records -----
+
 func TestIngestRecordBadJSON(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux, _ := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/records", bytes.NewBufferString("not-json"))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
@@ -58,8 +73,8 @@ func TestIngestRecordBadJSON(t *testing.T) {
 }
 
 func TestIngestRecordMissingFields(t *testing.T) {
-	_, mux := newTestServer(t)
-	body, _ := json.Marshal(alpr.ALPRRecord{}) // sem record_id nem assinatura
+	_, mux, _ := newTestServer(t)
+	body, _ := json.Marshal(alpr.ALPRRecord{})
 	req := httptest.NewRequest(http.MethodPost, "/records", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
@@ -69,7 +84,7 @@ func TestIngestRecordMissingFields(t *testing.T) {
 }
 
 func TestIngestBOLORecordBadJSON(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux, _ := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/bolo/records", bytes.NewBufferString("{"))
 	rr := httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
@@ -79,7 +94,7 @@ func TestIngestBOLORecordBadJSON(t *testing.T) {
 }
 
 func TestIngestBOLORecordMissingFields(t *testing.T) {
-	_, mux := newTestServer(t)
+	_, mux, _ := newTestServer(t)
 	body, _ := json.Marshal(alpr.BOLORecord{})
 	req := httptest.NewRequest(http.MethodPost, "/bolo/records", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
@@ -89,6 +104,93 @@ func TestIngestBOLORecordMissingFields(t *testing.T) {
 	}
 }
 
-// Garante que o pacote compila mesmo sem banco disponível.
-var _ = context.Background
-var _ = (*sql.DB)(nil)
+// ----- GET /records (busca aberta) -----
+
+func TestSearchOpenNoToken(t *testing.T) {
+	_, mux, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/records?camera_id=X&start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("esperado 401, got %d", rr.Code)
+	}
+}
+
+func TestSearchOpenMissingParams(t *testing.T) {
+	_, mux, judgeSK := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/records?camera_id=X", nil)
+	req.Header.Set("Authorization", bearerToken(t, judgeSK, token.SearchOpen))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("esperado 400, got %d", rr.Code)
+	}
+}
+
+func TestSearchOpenWrongTokenType(t *testing.T) {
+	_, mux, judgeSK := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/records?camera_id=X&start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z", nil)
+	req.Header.Set("Authorization", bearerToken(t, judgeSK, token.SearchClosed)) // tipo errado
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("esperado 403, got %d", rr.Code)
+	}
+}
+
+// ----- GET /records/closed (busca fechada) -----
+
+func TestSearchClosedNoToken(t *testing.T) {
+	_, mux, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/records/closed?plate_hmac=aabbcc", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("esperado 401, got %d", rr.Code)
+	}
+}
+
+func TestSearchClosedMissingParam(t *testing.T) {
+	_, mux, judgeSK := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/records/closed", nil)
+	req.Header.Set("Authorization", bearerToken(t, judgeSK, token.SearchClosed))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("esperado 400, got %d", rr.Code)
+	}
+}
+
+func TestSearchClosedInvalidHex(t *testing.T) {
+	_, mux, judgeSK := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/records/closed?plate_hmac=ZZZZ", nil)
+	req.Header.Set("Authorization", bearerToken(t, judgeSK, token.SearchClosed))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("esperado 400, got %d", rr.Code)
+	}
+}
+
+// ----- GET /bolo/records -----
+
+func TestSearchBOLONoToken(t *testing.T) {
+	_, mux, _ := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/bolo/records?plate_hmac=aabbcc", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("esperado 401, got %d", rr.Code)
+	}
+}
+
+func TestSearchBOLOWrongType(t *testing.T) {
+	_, mux, judgeSK := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/bolo/records?plate_hmac=aabb", nil)
+	req.Header.Set("Authorization", bearerToken(t, judgeSK, token.SearchOpen))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("esperado 403, got %d", rr.Code)
+	}
+}
