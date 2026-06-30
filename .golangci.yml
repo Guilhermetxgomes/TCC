@@ -1,0 +1,24 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck      # erros de retorno não verificados
+    - gosimple      # simplificações de código
+    - govet         # análise estática padrão do Go
+    - ineffassign   # atribuições sem efeito
+    - staticcheck   # checagens estáticas avançadas
+    - unused        # código não utilizado
+    - gosec         # problemas de segurança (crítico para este projeto)
+    - misspell      # erros de ortografia em comentários
+    - gofmt         # formatação padrão
+
+linters-settings:
+  gosec:
+    excludes:
+      - G404  # permite math/rand em contextos não-criptográficos (ex: testes)
+
+issues:
+  exclude-rules:
+    - path: "_test\\.go"
+      linters:
+        - gosec  # regras de segurança mais relaxadas em testes
