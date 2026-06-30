@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/google/uuid"
 
 	"github.com/Guilhermetxgomes/TCC/internal/alpr"
 	"github.com/Guilhermetxgomes/TCC/internal/server"

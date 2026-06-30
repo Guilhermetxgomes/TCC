@@ -8,9 +8,9 @@ import (
 
 // Capture representa uma captura bruta do sistema ALPR antes da cifragem.
 type Capture struct {
-	Plate    string
-	CameraID string
-	Location Location
+	Plate      string
+	CameraID   string
+	Location   Location
 	CapturedAt time.Time
 	Confidence float32
 	Speed      *float32

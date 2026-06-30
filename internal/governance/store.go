@@ -13,9 +13,9 @@ import (
 
 // monthlyKeyFile é o formato JSON salvo em disco.
 type monthlyKeyFile struct {
-	KeyMonth    string `json:"key_month"`
-	Nonce       []byte `json:"nonce"`
-	Ciphertext  []byte `json:"ciphertext"` // AES-256-GCM(passphrase→SHA-256, SK raw bytes)
+	KeyMonth   string `json:"key_month"`
+	Nonce      []byte `json:"nonce"`
+	Ciphertext []byte `json:"ciphertext"` // AES-256-GCM(passphrase→SHA-256, SK raw bytes)
 }
 
 // SaveMonthlyKey cifra a SK X25519 com a passphrase e salva em path.
