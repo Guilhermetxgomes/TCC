@@ -30,6 +30,44 @@ services:
       timeout: 5s
       retries: 5
 
+  # ── Migrations banco principal ─────────────────────────────────────────────
+  migrate-principal:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD obrigatório}
+    volumes:
+      - ./migrations/principal:/migrations:ro
+    command: >
+      sh -c "
+        for f in /migrations/*.up.sql; do
+          echo \"==> $$f\";
+          psql -h db-principal -p 5432 -U ${DB_USER:-tcc} -d ${DB_PRINCIPAL_NAME:-tcc_principal} -f $$f;
+        done
+      "
+    depends_on:
+      db-principal:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Migrations banco BOLO ──────────────────────────────────────────────────
+  migrate-bolo:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD obrigatório}
+    volumes:
+      - ./migrations/bolo:/migrations:ro
+    command: >
+      sh -c "
+        for f in /migrations/*.up.sql; do
+          echo \"==> $$f\";
+          psql -h db-bolo -p 5432 -U ${DB_USER:-tcc} -d ${DB_BOLO_NAME:-tcc_bolo} -f $$f;
+        done
+      "
+    depends_on:
+      db-bolo:
+        condition: service_healthy
+    restart: "no"
+
   # ── Servidor de custódia (banco principal) ─────────────────────────────────
   servidor:
     build:
@@ -49,6 +87,8 @@ services:
     depends_on:
       db-principal:
         condition: service_healthy
+      migrate-principal:
+        condition: service_completed_successfully
 
   # ── Servidor BOLO ──────────────────────────────────────────────────────────
   bolo:
@@ -69,6 +109,8 @@ services:
     depends_on:
       db-bolo:
         condition: service_healthy
+      migrate-bolo:
+        condition: service_completed_successfully
 
   # ── Coletor (simulador ALPR) ───────────────────────────────────────────────
   coletor:
@@ -84,8 +126,10 @@ services:
       CAMERA_ID: ${CAMERA_ID:-CAM-SIM-001}
       KEY_MONTH: ${KEY_MONTH:-2026-06}
     depends_on:
-      - servidor
-      - bolo
+      servidor:
+        condition: service_started
+      bolo:
+        condition: service_started
 
   # ── Governança (juiz + auditor) ────────────────────────────────────────────
   governanca:
@@ -96,9 +140,10 @@ services:
         TARGET: governanca
     env_file: .env
     ports:
-      - "${GOVERNANCA_PORT:-8082}:8082"
+      - "${GOVERNANCA_PORT:-8090}:8090"
     depends_on:
-      - servidor
+      servidor:
+        condition: service_started
 
 volumes:
   db-principal-data:
