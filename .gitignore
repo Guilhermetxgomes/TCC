@@ -6,9 +6,8 @@
 *.test
 *.out
 
-# Ambiente
+# Ambiente (usar .env.example como base)
 .env
-.env.*
 *.pem
 *.key
 
