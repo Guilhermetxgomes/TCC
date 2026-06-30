@@ -144,6 +144,6 @@ func sealTotal(plaintext []byte, monthlyPK *ecdh.PublicKey) (ct, nonce, encKey, 
 	}
 	ct = gcm.Seal(nil, nonce, plaintext, nil)
 
-	encKey, ephPK, _, err = ecc.SealKey(k, monthlyPK)
+	encKey, ephPK, err = ecc.SealKey(k, monthlyPK)
 	return
 }

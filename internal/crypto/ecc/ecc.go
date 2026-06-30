@@ -6,11 +6,13 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 )
 
 // SealKey cifra key com a PK mensal via X25519.
-// Retorna encryptedKey, ephemeralPK e nonce para armazenamento.
-func SealKey(key []byte, monthlyPK *ecdh.PublicKey) (encryptedKey, ephemeralPK, nonce []byte, err error) {
+// O nonce AES-GCM é prefixado ao blob encryptedKey (primeiros 12 bytes),
+// tornando-o auto-contido para armazenamento sem campo extra.
+func SealKey(key []byte, monthlyPK *ecdh.PublicKey) (encryptedKey, ephemeralPK []byte, err error) {
 	curve := ecdh.X25519()
 	ephSK, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
@@ -21,14 +23,14 @@ func SealKey(key []byte, monthlyPK *ecdh.PublicKey) (encryptedKey, ephemeralPK, 
 	if err != nil {
 		return
 	}
-	encKey := sha256.Sum256(shared)
+	aesKey := sha256.Sum256(shared)
 
-	nonce = make([]byte, 12)
+	nonce := make([]byte, 12)
 	if _, err = rand.Read(nonce); err != nil {
 		return
 	}
 
-	block, err := aes.NewCipher(encKey[:])
+	block, err := aes.NewCipher(aesKey[:])
 	if err != nil {
 		return
 	}
@@ -37,13 +39,21 @@ func SealKey(key []byte, monthlyPK *ecdh.PublicKey) (encryptedKey, ephemeralPK, 
 		return
 	}
 
-	encryptedKey = gcm.Seal(nil, nonce, key, nil)
+	// encryptedKey = nonce || AES-GCM(key)
+	ct := gcm.Seal(nil, nonce, key, nil)
+	encryptedKey = append(nonce, ct...)
 	ephemeralPK = ephSK.PublicKey().Bytes()
 	return
 }
 
 // OpenKey decifra encryptedKey usando a SK mensal e a ephemeralPK da câmera.
-func OpenKey(encryptedKey, ephemeralPK, nonce []byte, monthlySK *ecdh.PrivateKey) ([]byte, error) {
+// Espera o formato nonce||ciphertext produzido por SealKey.
+func OpenKey(encryptedKey, ephemeralPK []byte, monthlySK *ecdh.PrivateKey) ([]byte, error) {
+	if len(encryptedKey) < 12 {
+		return nil, errors.New("ecc.OpenKey: encryptedKey muito curto")
+	}
+	nonce, ct := encryptedKey[:12], encryptedKey[12:]
+
 	curve := ecdh.X25519()
 	ephPK, err := curve.NewPublicKey(ephemeralPK)
 	if err != nil {
@@ -54,9 +64,9 @@ func OpenKey(encryptedKey, ephemeralPK, nonce []byte, monthlySK *ecdh.PrivateKey
 	if err != nil {
 		return nil, err
 	}
-	encKey := sha256.Sum256(shared)
+	aesKey := sha256.Sum256(shared)
 
-	block, err := aes.NewCipher(encKey[:])
+	block, err := aes.NewCipher(aesKey[:])
 	if err != nil {
 		return nil, err
 	}
@@ -65,5 +75,5 @@ func OpenKey(encryptedKey, ephemeralPK, nonce []byte, monthlySK *ecdh.PrivateKey
 		return nil, err
 	}
 
-	return gcm.Open(nil, nonce, encryptedKey, nil)
+	return gcm.Open(nil, nonce, ct, nil)
 }
