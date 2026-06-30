@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/x509"
+	"encoding/pem"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,7 +27,13 @@ func main() {
 	}
 	defer dbBOLO.Close()
 
-	srv := server.New(dbPrincipal, dbBOLO)
+	judgePK, err := loadJudgePublicKey(env("JUDGE_PK_PATH", "/run/secrets/judge.pub.pem"))
+	if err != nil {
+		slog.Error("falha ao carregar chave pública do juiz", "err", err)
+		os.Exit(1)
+	}
+
+	srv := server.New(dbPrincipal, dbBOLO, judgePK)
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -34,6 +43,22 @@ func main() {
 		slog.Error("servidor encerrado", "err", err)
 		os.Exit(1)
 	}
+}
+
+func loadJudgePublicKey(path string) (*ecdsa.PublicKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, os.ErrInvalid
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return pub.(*ecdsa.PublicKey), nil
 }
 
 func env(key, fallback string) string {
