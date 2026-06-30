@@ -8,8 +8,12 @@
 
 # Ambiente (usar .env.example como base)
 .env
+.env.bak
 *.pem
 *.key
+
+# Segredos gerados por scripts/setup.sh
+secrets/
 
 # IDEs
 .idea/
