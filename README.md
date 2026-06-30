@@ -1,5 +1,7 @@
 # TCC — Sistema de Monitoramento de Tráfego Resistente à Vigilância em Massa
 
+[![CI](https://github.com/Guilhermetxgomes/TCC/actions/workflows/ci.yml/badge.svg)](https://github.com/Guilhermetxgomes/TCC/actions/workflows/ci.yml)
+
 Trabalho de Conclusão de Curso — Engenharia da Computação, Escola Politécnica da USP.
 
 Sistema ALPR (Automatic License Plate Recognition) que coleta dados de tráfego garantindo que nenhum acesso em massa seja possível sem autorização judicial e custo computacional deliberado.
