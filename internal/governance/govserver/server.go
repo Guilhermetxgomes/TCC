@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Guilhermetxgomes/TCC/internal/governance"
 	"github.com/Guilhermetxgomes/TCC/internal/storage"
 	"github.com/Guilhermetxgomes/TCC/internal/token"
 	"github.com/google/uuid"
@@ -55,6 +56,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /keys/monthly-pk", s.monthlyPK)
 	mux.HandleFunc("GET /keys/kgov", s.kgovEndpoint)
 	mux.HandleFunc("POST /tokens", s.issueToken)
+	mux.HandleFunc("POST /keys/split", s.splitKey)
+	mux.HandleFunc("POST /keys/reconstruct", s.reconstructKey)
 }
 
 // ----- /health -----
@@ -157,6 +160,92 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
 		"token_id": tok.TokenID,
 		"token":    string(tokenJSON),
+	})
+}
+
+// ----- POST /keys/split (T5.2) -----
+
+type splitKeyRequest struct {
+	Shares    int `json:"shares"`
+	Threshold int `json:"threshold"`
+}
+
+func (s *Server) splitKey(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Investigator-Key") != s.investigatorAPIKey {
+		http.Error(w, "X-Investigator-Key ausente ou inválido", http.StatusUnauthorized)
+		return
+	}
+	var req splitKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "corpo JSON inválido", http.StatusBadRequest)
+		return
+	}
+	if req.Threshold < 2 || req.Shares < req.Threshold {
+		http.Error(w, "shares >= threshold >= 2 obrigatório", http.StatusBadRequest)
+		return
+	}
+
+	shares, err := governance.SplitSK(s.monthlySK, req.Shares, req.Threshold)
+	if err != nil {
+		slog.Error("SplitSK", "err", err)
+		http.Error(w, "erro ao dividir chave", http.StatusInternalServerError)
+		return
+	}
+
+	hexShares := make([]string, len(shares))
+	for i, sh := range shares {
+		hexShares[i] = hex.EncodeToString(sh)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"key_month": s.keyMonth,
+		"threshold": req.Threshold,
+		"shares":    hexShares,
+	})
+}
+
+// ----- POST /keys/reconstruct (T5.3) -----
+
+type reconstructKeyRequest struct {
+	KeyMonth string   `json:"key_month"`
+	Shares   []string `json:"shares"` // hex-encoded
+}
+
+func (s *Server) reconstructKey(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Investigator-Key") != s.investigatorAPIKey {
+		http.Error(w, "X-Investigator-Key ausente ou inválido", http.StatusUnauthorized)
+		return
+	}
+	var req reconstructKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "corpo JSON inválido", http.StatusBadRequest)
+		return
+	}
+	if len(req.Shares) < 2 {
+		http.Error(w, "mínimo de 2 shares necessárias", http.StatusBadRequest)
+		return
+	}
+
+	rawShares := make([][]byte, len(req.Shares))
+	for i, h := range req.Shares {
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("share[%d] hex inválido", i), http.StatusBadRequest)
+			return
+		}
+		rawShares[i] = b
+	}
+
+	sk, err := governance.CombineSK(rawShares, s.monthlySK.PublicKey())
+	if err != nil {
+		http.Error(w, "reconstrução falhou: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"key_month": s.keyMonth,
+		"sk_hex":    hex.EncodeToString(sk.Bytes()),
 	})
 }
 
