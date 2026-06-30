@@ -19,13 +19,13 @@ import (
 
 // Server é o servidor HTTP de governança.
 type Server struct {
-	judgeSK     *ecdsa.PrivateKey
-	monthlySK   *ecdh.PrivateKey
-	keyMonth    string
-	kgov        []byte
-	cameraAPIKey string // câmeras usam este API key para buscar K_gov
-	investigatorAPIKey string // investigadores usam este API key para solicitar tokens
-	db          *sql.DB // pode ser nil em testes
+	judgeSK            *ecdsa.PrivateKey
+	monthlySK          *ecdh.PrivateKey
+	keyMonth           string
+	kgov               []byte
+	cameraAPIKey       string  // câmeras usam este API key para buscar K_gov
+	investigatorAPIKey string  // investigadores usam este API key para solicitar tokens
+	db                 *sql.DB // pode ser nil em testes
 }
 
 // Config reúne todas as dependências do servidor de governança.

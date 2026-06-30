@@ -4,6 +4,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/Guilhermetxgomes/TCC/internal/crypto/signing"
@@ -57,5 +59,44 @@ func TestVerifyRejectsCorruptedSignature(t *testing.T) {
 
 	if signing.Verify(&sk.PublicKey, message, sig) {
 		t.Fatal("Verify aceitou assinatura corrompida")
+	}
+}
+
+func TestLoadOrGenerateKey_GeneratesWhenAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cam.pem")
+
+	sk, err := signing.LoadOrGenerateKey(path)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateKey: %v", err)
+	}
+	if sk == nil {
+		t.Fatal("chave nula")
+	}
+
+	// Arquivo deve ter sido criado
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("arquivo não criado: %v", err)
+	}
+
+	// Round-trip: carrega do arquivo
+	sk2, err := signing.LoadOrGenerateKey(path)
+	if err != nil {
+		t.Fatalf("LoadOrGenerateKey (reload): %v", err)
+	}
+
+	// Chave recarregada deve produzir assinaturas verificáveis pela PK original
+	msg := []byte("round-trip")
+	sig, _ := signing.Sign(sk2, msg)
+	if !signing.Verify(&sk.PublicKey, msg, sig) {
+		t.Error("chave recarregada não é a mesma que a gerada")
+	}
+}
+
+func TestLoadOrGenerateKey_RejectsInvalidPEM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "invalid.pem")
+	os.WriteFile(path, []byte("not a pem"), 0600)
+
+	if _, err := signing.LoadOrGenerateKey(path); err == nil {
+		t.Fatal("esperava erro com PEM inválido")
 	}
 }
