@@ -1,0 +1,19 @@
+# Binários
+/bin/
+*.exe
+
+# Go
+*.test
+*.out
+go.sum
+
+# Ambiente
+.env
+.env.*
+*.pem
+*.key
+
+# IDEs
+.idea/
+.vscode/
+*.swp
