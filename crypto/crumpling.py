@@ -9,8 +9,8 @@ def generate_nonce():
 def generate_c_prime():
     return os.urandom(32)
 
-def generate_k(N):
-    return random.randrange(0, N - 1)
+def generate_k(n):
+    return random.randrange(0, n)
 
 def derive_key(c_prime, k):
     k_bytes = k.to_bytes((k.bit_length() + 7) // 8 or 1, byteorder="big")
