@@ -1,11 +1,10 @@
 import base64
-from ast import List
 
 from database.connection import get_connection
 from entities.record import Record
 
 
-class Servidor:
+class Server:
     def __init__(self):
         self.conn = get_connection()
 
