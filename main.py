@@ -1,5 +1,5 @@
 from services.camera import Camera
-from services.servidor import Servidor
+from services.server import Server
 from crypto.puzzle import solve_puzzle
 
 
@@ -12,7 +12,7 @@ def rodar_cenario(puzzle_level: int, placa: str = "ABC1234"):
     record = camera.encrypt_plate(placa)
     print(f"Placa cifrada. c_prime={record.c_prime.hex()[:16]}...")
 
-    servidor = Servidor()
+    servidor = Server()
     servidor.save(record)
     print("Registro salvo no banco.")
 
@@ -35,3 +35,4 @@ if __name__ == "__main__":
     rodar_cenario(puzzle_level=100)
     rodar_cenario(puzzle_level=10_000)
     rodar_cenario(puzzle_level=1_000_000)
+    rodar_cenario(puzzle_level=10_000_000)
