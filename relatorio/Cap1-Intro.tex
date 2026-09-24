@@ -1,0 +1,29 @@
+\chapter{Introdução} \label{cap:introducao}
+
+O avanço de infraestruturas urbanas conectadas e a expansão de sistemas automáticos de leitura de placas ampliaram significativamente a capacidade de coleta e armazenamento de dados de deslocamento veicular. Embora esses sistemas contribuam para atividades legítimas de segurança pública e investigação criminal, também introduzem riscos relevantes à privacidade individual, sobretudo quando o acesso às bases ocorre de forma ampla, contínua e pouco proporcional. Nesse contexto, este trabalho investiga uma abordagem criptográfica para impor limites econômicos ao acesso massivo de dados, preservando a utilidade investigativa em casos específicos e reduzindo a viabilidade prática da vigilância indiscriminada.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Motivação}
+A digitalização do monitoramento de tráfego transformou bases de dados veiculares em ativos estratégicos para o Estado, mas também em pontos críticos de potencial abuso. Em especial, a coleta contínua por câmeras de leitura de placas gera grandes volumes de informações sensíveis sobre rotinas, deslocamentos e padrões de comportamento da população. Sem mecanismos técnicos de contenção, o acesso a esse tipo de base pode favorecer práticas de vigilância em massa, incompatíveis com princípios de necessidade, proporcionalidade e minimização de dados.
+
+Como referência conceitual, a tese de \textit{Crypto Crumple Zones} \cite{wright2018} propõe o uso de criptografia para impor um custo por dado recuperado, criando um freio econômico ao acesso irrestrito. Motivado por essa ideia, este projeto direciona a discussão para o domínio específico do monitoramento veicular, no qual o problema assume maior complexidade devido ao volume, à granularidade temporal dos registros e ao potencial de rastreamento populacional. Assim, a motivação central é desenvolver uma solução que preserve a capacidade investigativa em situações legítimas, sem permitir que a mesma infraestrutura seja utilizada para vigilância em massa da população
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Objetivos}
+O principal objetivo deste projeto é desenvolver um sistema de proteção para bases de dados de monitoramento veicular que utilize a criptografia para condicionar o acesso à informação ao gasto de recursos computacionais, inibindo tecnologicamente a vigilância em massa. Para isso, o trabalho busca implementar chaves de criptografia independentes para cada registro de placa capturado, garantindo que o custo de acesso seja individual e escale de forma linear.
+
+O projeto visa calibrar a dificuldade criptográfica para que o custo de decodificação de um veículo seja economicamente aceitável para investigações legítimas, mas orçamentariamente proibitivo para o monitoramento em larga escala.
+
+Por fim, será feita uma análise da viabilidade técnica e econômica do modelo proposto, enfatizando o \textit{trade-off} entre segurança e usabilidade em um contexto real.
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+\section{Justificativa}
+Este trabalho se justifica pela necessidade de conciliar dois interesses públicos legítimos e, muitas vezes, tensionados: a eficiência das investigações criminais e a proteção da privacidade dos cidadãos. Modelos tradicionais de acesso integral às bases de monitoramento tendem a tratar consultas pontuais e varreduras massivas com o mesmo custo operacional, o que pode estimular usos desproporcionais da informação. Ao introduzir um custo criptográfico por registro acessado, a proposta busca alterar esse incentivo: consultas direcionadas permanecem viáveis, enquanto extrações em larga escala tornam-se progressivamente mais caras.
+
+Do ponto de vista técnico e social, a abordagem é relevante por incorporar o princípio da proporcionalidade ao próprio desenho do sistema, deslocando parte da governança do campo exclusivamente normativo para o campo tecnológico. Em vez de depender apenas de controles administrativos ou legais, o mecanismo criptográfico atua como barreira prática contra acessos arbitrários, reforçando garantias institucionais de proteção de dados. Além disso, ao adaptar os princípios de \textit{Crypto Crumple Zones} ao cenário de tráfego veicular \cite{wright2018}, o trabalho contribui para a literatura aplicada em segurança da informação e privacidade, oferecendo um modelo com potencial de adoção em contextos reais.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%
+% \section{Organização do Trabalho}
+% Descrever sucintamente os capítulos e as demais partes do trabalho.
+
+% Lembre-se de colocar rótulos nos capítulos e seções (com label{} ) e depois utilizar o ref{}
+% Por exemplo, o Capítulo \ref{cap:conceitos} apresenta conceitos....
