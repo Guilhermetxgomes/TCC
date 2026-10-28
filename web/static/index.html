@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulação Crumple Zones</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>Simulação de busca em grafo <span class="muted">· Cidade Universitária (USP)</span></h1>
+    <p class="muted">Cada vértice é uma câmera; os carros seguem as probabilidades das arestas. Clique num vértice para ver o que o banco guarda.</p>
+  </header>
+
+  <main>
+    <section class="map-pane">
+      <div id="cy" aria-label="Grafo da cidade"></div>
+      <div class="playbar">
+        <button id="play" type="button" disabled>Reproduzir</button>
+        <input id="slider" type="range" min="0" max="240" step="0.1" value="0" disabled aria-label="Tempo da simulação">
+        <span id="clock" class="mono">08:00:00</span>
+        <label>velocidade
+          <select id="speed">
+            <option value="2">2×</option>
+            <option value="6" selected>6×</option>
+            <option value="15">15×</option>
+            <option value="40">40×</option>
+          </select>
+        </label>
+      </div>
+      <div class="legend muted">
+        <span><i class="dot car"></i>carro</span>
+        <span><i class="dot criminal"></i>carro do crime (após o crime)</span>
+        <span><i class="dot crime"></i>câmera do crime</span>
+        <span><i class="dot visited"></i>câmera consultada</span>
+        <span><i class="dot found"></i>placa achada / alerta</span>
+        <span>espessura da aresta = probabilidade</span>
+      </div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <h2>1 · Simulação</h2>
+        <div class="grid">
+          <label>seed <input id="p-seed" type="number" value="1" min="0"></label>
+          <label>carros <input id="p-vehicles" type="number" value="120" min="10" max="400"></label>
+          <label>ticks (10 s) <input id="p-ticks" type="number" value="240" min="60" max="600"></label>
+          <label>tick do crime <input id="p-crime" type="number" value="60" min="0"></label>
+          <label>puzzle N (real) <input id="p-n" type="number" value="1000" min="2"></label>
+        </div>
+        <button id="simulate" type="button" class="primary">Gerar simulação</button>
+        <p id="sim-info" class="muted small"></p>
+      </section>
+
+      <section class="card">
+        <h2>2 · Busca pelo carro do crime</h2>
+        <div class="grid">
+          <label>modalidade
+            <select id="s-mode">
+              <option value="fechada">Busca fechada (placa conhecida)</option>
+              <option value="aberta">Busca aberta (placa desconhecida)</option>
+              <option value="bolo">BOLO normal (alerta em claro)</option>
+            </select>
+          </label>
+          <label id="l-hint">letras da placa lembradas
+            <select id="s-hint">
+              <option value="0">0 (nenhuma)</option>
+              <option value="1">1</option><option value="2">2</option>
+              <option value="3" selected>3</option><option value="4">4</option>
+              <option value="7">7 (placa inteira)</option>
+            </select>
+          </label>
+          <label id="l-delay">atraso do BOLO (ticks)
+            <input id="s-delay" type="number" value="2" min="0" max="60">
+          </label>
+          <label id="l-hops">máx. câmeras seguidas <input id="s-hops" type="number" value="6" min="1" max="20"></label>
+          <label id="l-until" class="check" title="Sem limite: só para quando nenhuma câmera tem mais a placa na janela (fim da gravação ou rastro perdido).">
+            <input id="s-until" type="checkbox"> seguir até perder o rastro
+          </label>
+          <label>N realista (extrapolação)
+            <select id="s-realistic">
+              <option value="1000000">10⁶</option>
+              <option value="10000000" selected>10⁷</option>
+              <option value="100000000">10⁸</option>
+              <option value="1000000000">10⁹</option>
+            </select>
+          </label>
+        </div>
+        <button id="search" type="button" class="primary" disabled>Disparar busca</button>
+        <p id="mode-note" class="muted small"></p>
+        <div id="result" hidden>
+          <dl class="stats" id="stats"></dl>
+          <ol id="steps" class="steps"></ol>
+        </div>
+      </section>
+
+      <section class="card" id="vertex-card">
+        <h2>3 · Banco de dados no vértice</h2>
+        <p id="vertex-empty" class="muted small">Clique num vértice do grafo.</p>
+        <div id="vertex" hidden>
+          <p><strong id="v-name"></strong> <span class="muted small" id="v-meta"></span></p>
+          <p class="muted small" id="v-note"></p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>id</th><th>hora</th><th>n</th><th>c_prime</th><th>nonce</th><th>ciphertext</th><th></th></tr></thead>
+              <tbody id="v-rows"></tbody>
+            </table>
+          </div>
+          <button id="v-more" type="button" hidden>Carregar mais</button>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
