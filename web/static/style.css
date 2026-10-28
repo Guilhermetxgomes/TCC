@@ -95,6 +95,9 @@ main {
   margin-top: 6px;
   font-size: 12px;
 }
+.grid label.check { flex-direction: row; align-items: center; gap: 6px; align-self: end; padding-bottom: 6px; }
+.grid label.check input { padding: 0; }
+
 .dot {
   display: inline-block;
   width: 9px;

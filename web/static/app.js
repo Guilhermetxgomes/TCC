@@ -272,7 +272,15 @@ function updateModeUi() {
   $("mode-note").textContent = MODE_NOTES[mode];
   $("l-hint").hidden = mode !== "aberta";
   $("l-delay").hidden = mode !== "bolo";
+  $("l-hops").hidden = mode === "bolo";
+  $("l-until").hidden = mode === "bolo";
+  $("s-hops").disabled = $("s-until").checked;
 }
+
+const STOP_REASONS = {
+  max_hops: "limite de câmeras atingido (o carro continua)",
+  lost: "sem novos registros: fim da gravação ou rastro perdido",
+};
 
 function resetSearchStyles() {
   cy.nodes(".cam").removeClass("visited found");
@@ -310,10 +318,18 @@ function renderStats(result, partial) {
     }
     const truth = result.truth;
     rows.push(...statRow(
-      "rastro × trajeto real",
-      truth.traced_nodes ? `${truth.matching_nodes}/${truth.traced_nodes} câmeras` : "não achou",
+      "avistamentos reais confirmados",
+      truth.traced_nodes ? `${truth.matching_nodes}/${truth.traced_nodes}` : "não achou",
       truth.followed_criminal ? "ok" : "bad",
     ));
+    if (truth.skipped_sightings) {
+      rows.push(...statRow("avistamentos reais pulados", String(truth.skipped_sightings)));
+    }
+    const criminalPath = result.paths.find((p) => p.is_criminal);
+    if (criminalPath && criminalPath.stopped_by) {
+      rows.push(...statRow("câmeras seguidas", String(criminalPath.nodes.length - 1)));
+      rows.push(...statRow("busca parou", STOP_REASONS[criminalPath.stopped_by]));
+    }
   }
   $("stats").replaceChildren(...rows);
 }
@@ -342,7 +358,8 @@ async function runSearch() {
   try {
     const result = await api("/api/search", {
       run_id: state.sim.run_id, mode: $("s-mode").value, hint_len: +$("s-hint").value,
-      bolo_delay_ticks: +$("s-delay").value, max_hops: +$("s-hops").value, realistic_n: +$("s-realistic").value,
+      bolo_delay_ticks: +$("s-delay").value, max_hops: +$("s-hops").value, until_lost: $("s-until").checked,
+      realistic_n: +$("s-realistic").value,
     });
     if (token !== state.searchToken) return;
     await animateSearch(result, token);
@@ -356,21 +373,27 @@ async function runSearch() {
 async function animateSearch(result, token) {
   const running = { probes: 0, records_tested: 0, attempts: 0, real_seconds: 0 };
   const list = $("steps");
-  const delay = result.steps.length > 60 ? 40 : 450;
+  // ~12 s for a long search (until-lost can have thousands of steps), 450 ms per step for short ones
+  const delay = Math.max(3, Math.min(450, Math.round(12000 / result.steps.length)));
   let active = null;
 
   for (const step of result.steps) {
     if (token !== state.searchToken) return;
     if (active) active.classList.remove("active");
-    const item = el("li", { class: step.found ? "found active" : "active" }, el("span", { text: stepLabel(step) }));
-    list.append(item);
-    list.scrollTop = list.scrollHeight;
-    active = item;
 
     running.probes += step.kind === "alert" ? 0 : 1;
     running.records_tested += step.records_tested;
     running.attempts += step.attempts;
     running.real_seconds += step.real_seconds;
+
+    // right-hand column: records decrypted so far, to watch the cost grow camera by camera
+    const item = el("li", { class: step.found ? "found active" : "active" },
+      el("span", { text: stepLabel(step) }),
+      el("span", { class: "mono", text: `Σ ${running.records_tested}`, title: "registros decifrados até aqui" }),
+    );
+    list.append(item);
+    list.scrollTop = list.scrollHeight;
+    active = item;
     renderStats(result, { ...running });
 
     cy.getElementById(`n${step.node}`).addClass(step.found ? "found" : "visited");
@@ -457,6 +480,7 @@ async function showVertex(nodeId, offset) {
 $("simulate").addEventListener("click", runSimulation);
 $("search").addEventListener("click", runSearch);
 $("s-mode").addEventListener("change", updateModeUi);
+$("s-until").addEventListener("change", updateModeUi);
 $("play").addEventListener("click", () => (state.playing ? pause() : play()));
 $("slider").addEventListener("input", (event) => { pause(); setTick(+event.target.value); });
 

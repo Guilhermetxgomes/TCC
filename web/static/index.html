@@ -73,7 +73,10 @@
           <label id="l-delay">atraso do BOLO (ticks)
             <input id="s-delay" type="number" value="2" min="0" max="60">
           </label>
-          <label>máx. câmeras seguidas <input id="s-hops" type="number" value="6" min="1" max="20"></label>
+          <label id="l-hops">máx. câmeras seguidas <input id="s-hops" type="number" value="6" min="1" max="20"></label>
+          <label id="l-until" class="check" title="Sem limite: só para quando nenhuma câmera tem mais a placa na janela (fim da gravação ou rastro perdido).">
+            <input id="s-until" type="checkbox"> seguir até perder o rastro
+          </label>
           <label>N realista (extrapolação)
             <select id="s-realistic">
               <option value="1000000">10⁶</option>
