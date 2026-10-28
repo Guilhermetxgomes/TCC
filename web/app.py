@@ -104,7 +104,8 @@ def api_search():
     world = _world(str(body.get("run_id", "")))
     mode = body.get("mode", "fechada")
     window = _int(body, "window_ticks", investigation.DEFAULT_WINDOW_TICKS, 1, 30)
-    max_hops = _int(body, "max_hops", investigation.DEFAULT_MAX_HOPS, 1, 20)
+    # until_lost: follow the car until no camera has it any more (no hop limit)
+    max_hops = None if body.get("until_lost") else _int(body, "max_hops", investigation.DEFAULT_MAX_HOPS, 1, 20)
     realistic_n = _int(body, "realistic_n", investigation.DEFAULT_REALISTIC_N, 2, 10**12)
 
     with lock:

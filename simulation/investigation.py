@@ -65,17 +65,35 @@ class Investigator:
                 break
         return step
 
-    def _trace(self, plate: str, node: int, tick: int, max_hops: int, suspect: Optional[str] = None):
-        """Follows `plate` away from (node, tick): probe the likeliest next cameras first."""
+    def _trace(self, plate: str, node: int, tick: int, max_hops: Optional[int], suspect: Optional[str] = None):
+        """
+        Follows `plate` away from (node, tick): probe the likeliest next cameras first.
+
+        max_hops=None follows the car until the trail goes cold. That always terminates:
+        every hop moves at least one tick forward and there are no records past the end
+        of the recording. Returns (steps, path, stop_reason), where stop_reason is
+        "max_hops" (limit reached) or "lost" (no camera has the plate in its window:
+        end of the recording or a lost trail).
+        """
         steps, path = [], [(node, tick)]
         previous = None  # the investigator does not know where the car came from
-        for _ in range(max_hops):
+        stop_reason = "lost"
+        hops = 0
+        while True:
+            if max_hops is not None and hops >= max_hops:
+                stop_reason = "max_hops"
+                break
             probs = self.graph.next_probs(node, previous)
             hit = None
-            for candidate in sorted(probs, key=probs.get, reverse=True):
+            order = sorted(probs, key=probs.get, reverse=True)
+            if previous is not None and previous not in probs and (node, previous) in self.graph.edges:
+                # Last resort before giving up: the no-U-turn rule assumes we know where the car came
+                # from, but if the window skipped a camera we do not, and going back may be legitimate.
+                order.append(previous)
+            for candidate in order:
                 low, high = travel_window(self.graph, node, candidate)
                 step = self._probe(candidate, tick + low, tick + high, plate)
-                step.update(from_node=node, p=probs[candidate], suspect=suspect)
+                step.update(from_node=node, p=probs.get(candidate, 0.0), suspect=suspect)
                 steps.append(step)
                 if step["found"]:
                     hit = step
@@ -84,24 +102,25 @@ class Investigator:
                 break  # lost the trail (e.g. beyond the end of the recordings)
             previous, node, tick = node, hit["node"], hit["tick"]
             path.append((node, tick))
-        return steps, path
+            hops += 1
+        return steps, path, stop_reason
 
     # -- modalities -----------------------------------------------------
 
-    def busca_fechada(self, window_ticks: int = DEFAULT_WINDOW_TICKS, max_hops: int = DEFAULT_MAX_HOPS,
+    def busca_fechada(self, window_ticks: int = DEFAULT_WINDOW_TICKS, max_hops: Optional[int] = DEFAULT_MAX_HOPS,
                       realistic_n: int = DEFAULT_REALISTIC_N) -> dict:
         crime = self.world.crime
         first = self._probe(crime.node, crime.tick - window_ticks, crime.tick + window_ticks, crime.plate)
         first.update(from_node=None, p=None, suspect=crime.plate)
         steps, paths = [first], []
         if first["found"]:
-            trace_steps, path = self._trace(crime.plate, crime.node, first["tick"], max_hops, crime.plate)
+            trace_steps, path, stop = self._trace(crime.plate, crime.node, first["tick"], max_hops, crime.plate)
             steps += trace_steps
-            paths.append({"plate": crime.plate, "is_criminal": True, "nodes": path})
+            paths.append({"plate": crime.plate, "is_criminal": True, "nodes": path, "stopped_by": stop})
         return self._result("fechada", steps, paths, realistic_n)
 
     def busca_aberta(self, hint_len: int = 3, window_ticks: int = DEFAULT_WINDOW_TICKS,
-                     max_hops: int = DEFAULT_MAX_HOPS, max_suspects: int = DEFAULT_MAX_SUSPECTS,
+                     max_hops: Optional[int] = DEFAULT_MAX_HOPS, max_suspects: int = DEFAULT_MAX_SUSPECTS,
                      realistic_n: int = DEFAULT_REALISTIC_N) -> dict:
         crime = self.world.crime
         rows = self._window(crime.node, crime.tick - window_ticks, crime.tick + window_ticks)
@@ -123,9 +142,9 @@ class Investigator:
         decrypt.update(candidates=len(candidates), hint=hint, suspects=len(suspects))
         steps, paths = [decrypt], []
         for plate, tick in suspects[:max_suspects]:
-            trace_steps, path = self._trace(plate, crime.node, tick, max_hops, plate)
+            trace_steps, path, stop = self._trace(plate, crime.node, tick, max_hops, plate)
             steps += trace_steps
-            paths.append({"plate": plate, "is_criminal": plate == crime.plate, "nodes": path})
+            paths.append({"plate": plate, "is_criminal": plate == crime.plate, "nodes": path, "stopped_by": stop})
         result = self._result("aberta", steps, paths, realistic_n)
         result["extra"] = {
             "hint": hint, "candidates": len(candidates), "suspects": len(suspects),
@@ -191,11 +210,14 @@ class Investigator:
         )
         truth = expected if expected is not None else self._true_escape()
         criminal_path = next((p["nodes"] for p in paths if p["is_criminal"]), [])
-        matching = 0
-        for traced, real in zip(criminal_path, truth):
-            if traced[0] != real[0]:
-                break
-            matching += 1
+        # A plate match is exact, so every traced point is a real sighting; what can differ from the
+        # real route is a camera the (wide) time window skipped. Count both.
+        real_sightings = set(truth)
+        matching = sum(1 for point in criminal_path if tuple(point) in real_sightings)
+        skipped = 0
+        if criminal_path:
+            first_tick, last_tick = criminal_path[0][1], criminal_path[-1][1]
+            skipped = max(0, sum(1 for _, tick in truth if first_tick <= tick <= last_tick) - matching)
         return {
             "mode": mode,
             "steps": steps,
@@ -206,6 +228,7 @@ class Investigator:
                 "escape": truth,
                 "traced_nodes": len(criminal_path),
                 "matching_nodes": matching,
+                "skipped_sightings": skipped,
                 "followed_criminal": bool(criminal_path) and matching == len(criminal_path),
             },
         }
