@@ -1,4 +1,5 @@
 import time
+from typing import Callable
 
 from entities.blocklist_entry import BlocklistEntry
 
@@ -31,11 +32,14 @@ class Blocklist:
       normal capture loop.
     """
 
-    def __init__(self):
+    def __init__(self, clock: Callable[[], float] = time.time):
+        # The clock is injectable so that TTLs can follow a simulated time
+        # (web simulation) instead of the wall clock. Default is unchanged.
+        self._clock = clock
         self._entries: dict[str, BlocklistEntry] = {}
 
     def add(self, plate: str, reason: str = "", ttl_seconds: float = 24 * 3600) -> None:
-        self._entries[plate] = BlocklistEntry(reason=reason, expires_at=time.time() + ttl_seconds)
+        self._entries[plate] = BlocklistEntry(reason=reason, expires_at=self._clock() + ttl_seconds)
 
     def contains(self, plate: str) -> bool:
         self._purge_expired()
@@ -47,7 +51,7 @@ class Blocklist:
         return entry.reason if entry else ""
 
     def _purge_expired(self) -> None:
-        now = time.time()
+        now = self._clock()
         expired_plates = [plate for plate, entry in self._entries.items() if entry.expires_at <= now]
         for plate in expired_plates:
             del self._entries[plate]

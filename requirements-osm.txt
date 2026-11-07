@@ -1,0 +1,3 @@
+# Só necessário para scripts/download_city.py (gera simulation/data/city.json uma única vez).
+# A simulação em si lê o JSON e não precisa de osmnx.
+osmnx

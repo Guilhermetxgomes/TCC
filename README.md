@@ -41,8 +41,31 @@ main_bolo_normal.py              simulação do fluxo BOLO normal (blocklist loc
 main_combined_usage.py           uso combinado de busca_aberta e BOLO normal na mesma janela de captura
 main_bolo_normal_complexity.py   análise de complexidade temporal e espacial do BOLO normal na câmera
 teste_multiplos_registros.py     benchmark de custo (USD) de busca_fechada/busca_aberta em escala
+simulation/                      simulação em grafo (motor de tráfego, investigação, custo) usada pela interface web
+scripts/download_city.py         gera simulation/data/city.json a partir do OpenStreetMap (só necessário uma vez)
+web/                             API Flask + interface (Cytoscape.js) da simulação
 relatorio/                       fonte LaTeX e PDF do relatório (Capítulos 1–4, referências)
 ```
+
+## Simulação web em grafo
+
+Simulação da **Cidade Universitária (USP, Butantã)**: cada cruzamento é um vértice com uma câmera (`Camera` + `Server` reais, gravando no Postgres), e cada aresta tem a probabilidade de um carro escolhê-la a partir do vértice. Vários carros circulam; em certo momento um deles comete um crime, e a interface mostra a investigação percorrendo o grafo:
+
+- **Busca fechada** (placa conhecida): resolve os puzzles do crime e, câmera a câmera, os dos vizinhos mais prováveis até achar o carro.
+- **Busca aberta** (placa desconhecida): decifra todos os registros da janela do crime, filtra pelas letras da placa lembradas e segue cada suspeito.
+- **BOLO normal**: as câmeras alertam em claro, sem puzzle, mas só para avistamentos posteriores ao aviso.
+
+Clicar num vértice mostra o que o banco guarda (`c_prime`, `n`, `nonce`, `ciphertext`; a placa não é armazenada) e permite decifrar um registro. A busca roda com `puzzle_level` pequeno (padrão 1000) para ser ao vivo, e o custo é extrapolado para um N realista (tentativas, tempo e US$ AWS).
+
+```bash
+docker compose up db                       # Postgres
+pip install -r requirements.txt
+flask --app web.app run --port 5001        # http://127.0.0.1:5001 (no macOS a 5000 é do AirPlay)
+python -m simulation.selfcheck             # verificação sem interface
+```
+
+O grafo já vem em `simulation/data/city.json`. Para regerá-lo: `pip install -r requirements-osm.txt && python scripts/download_city.py`.
+Bancos já inicializados recebem a coluna `run_id` automaticamente (`Server.ensure_schema()`); a migration `002_add_run_id.sql` cobre bancos novos.
 
 O código implementa e valida experimentalmente os conceitos de *crumpling*, puzzle de prova de trabalho e busca aberta/fechada descritos no relatório, além do fluxo BOLO (Seção 3.1) integrado à câmera.
 

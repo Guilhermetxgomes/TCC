@@ -1,2 +1,6 @@
 .env
 .idea/
+# Geração de dados / artefatos locais
+cache/
+.DS_Store
+__pycache__/
