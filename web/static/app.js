@@ -29,6 +29,8 @@ function el(tag, props = {}, ...children) {
     if (key === "class") node.className = value;
     else if (key === "text") node.textContent = value;
     else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (value === false || value === null || value === undefined) continue;
+    else if (value === true) node.setAttribute(key, "");
     else node.setAttribute(key, value);
   }
   for (const child of children) node.append(child);
@@ -54,7 +56,8 @@ function fmtDuration(seconds) {
   if (seconds < 3600) return `${(seconds / 60).toFixed(1)} min`;
   if (seconds < 86400) return `${(seconds / 3600).toFixed(1)} h`;
   if (seconds < 86400 * 365) return `${(seconds / 86400).toFixed(1)} dias`;
-  return `${(seconds / (86400 * 365)).toFixed(1)} anos`;
+  const years = seconds / (86400 * 365);
+  return years < 100 ? `${years.toFixed(1)} anos` : `${fmtNumber(Math.round(years))} anos`;
 }
 
 function fmtUsd(value) {
@@ -103,16 +106,50 @@ function buildStyle() {
     { selector: "node.cam:selected", style: { "overlay-opacity": 0.12, "border-color": cssVar("--accent"), "border-width": 3 } },
     { selector: "edge", style: {
       width: "mapData(p, 0, 1, 1, 5)", "line-color": cssVar("--edge"), "target-arrow-color": cssVar("--edge"),
-      "target-arrow-shape": "triangle", "arrow-scale": 0.6, "curve-style": "bezier", opacity: 0.55,
+      "source-arrow-color": cssVar("--edge"), "target-arrow-shape": "triangle", "arrow-scale": 0.6,
+      "curve-style": "bezier", opacity: 0.55,
     } },
-    { selector: "edge.probe", style: { "line-color": cssVar("--visited"), "target-arrow-color": cssVar("--visited"), opacity: 1 } },
-    { selector: "edge.trail", style: { "line-color": cssVar("--trail"), "target-arrow-color": cssVar("--trail"), width: 5, opacity: 1 } },
-    { selector: "edge.trail-other", style: { "line-color": cssVar("--trail"), "target-arrow-color": cssVar("--trail"), width: 2, opacity: 0.45 } },
+    { selector: "edge[?both]", style: { "source-arrow-shape": "triangle" } },
+    { selector: "edge.probe", style: {
+      "line-color": cssVar("--visited"), "target-arrow-color": cssVar("--visited"), "source-arrow-color": cssVar("--visited"), opacity: 1,
+    } },
+    { selector: "edge.trail", style: {
+      "line-color": cssVar("--trail"), "target-arrow-color": cssVar("--trail"), "source-arrow-color": cssVar("--trail"), width: 5, opacity: 1,
+    } },
+    { selector: "edge.trail-other", style: {
+      "line-color": cssVar("--trail"), "target-arrow-color": cssVar("--trail"), "source-arrow-color": cssVar("--trail"), width: 2, opacity: 0.45,
+    } },
     { selector: "node.car", style: {
       width: 7, height: 7, "background-color": cssVar("--car"), "border-width": 0, events: "no", "z-index": 20,
     } },
     { selector: "node.car.criminal", style: { "background-color": cssVar("--criminal"), width: 11, height: 11, "z-index": 30 } },
   ];
+}
+
+// One drawn edge per road: a two-way road (u->v and v->u) becomes a single line with an
+// arrow at each end. state.edgeIds maps every direction "u-v" to the element that draws it.
+function mergedEdges(edges) {
+  const byPair = new Map();
+  for (const e of edges) byPair.set(`${e.source}-${e.target}`, e);
+  state.edgeIds = {};
+  const elements = [];
+  for (const e of edges) {
+    const key = `${e.source}-${e.target}`;
+    if (state.edgeIds[key]) continue;
+    const back = e.source !== e.target ? byPair.get(`${e.target}-${e.source}`) : undefined;
+    const id = `e${key}`;
+    state.edgeIds[key] = id;
+    if (back) state.edgeIds[`${e.target}-${e.source}`] = id;
+    elements.push({
+      group: "edges",
+      data: { id, source: `n${e.source}`, target: `n${e.target}`, p: back ? Math.max(e.p, back.p) : e.p, both: Boolean(back) },
+    });
+  }
+  return elements;
+}
+
+function edgeOf(from, to) {
+  return cy.getElementById(state.edgeIds[`${from}-${to}`] || `e${from}-${to}`);
 }
 
 async function initGraph() {
@@ -124,13 +161,23 @@ async function initGraph() {
       data: { id: `n${n.id}`, nid: n.id, name: n.name },
       position: state.nodePos[n.id], grabbable: false,
     })),
-    ...state.graph.edges.map((e) => ({
-      group: "edges", data: { id: `e${e.source}-${e.target}`, source: `n${e.source}`, target: `n${e.target}`, p: e.p },
-    })),
+    ...mergedEdges(state.graph.edges),
   ];
-  cy = cytoscape({ container: $("cy"), elements, style: buildStyle(), layout: { name: "preset" }, wheelSensitivity: 0.25 });
-  cy.fit(cy.nodes(".cam"), 24);
-  window.addEventListener("resize", () => { cy.resize(); cy.fit(cy.nodes(".cam"), 24); });
+  // Wheel zoom off: scrolling over the map scrolls the page instead of zooming the graph.
+  // Zoom goes through the buttons; dragging still pans.
+  cy = cytoscape({
+    container: $("cy"), elements, style: buildStyle(), layout: { name: "preset" },
+    userZoomingEnabled: false, boxSelectionEnabled: false, minZoom: 0.2, maxZoom: 6,
+  });
+  const fit = () => cy.fit(cy.nodes(".cam"), 24);
+  fit();
+  const zoomBy = (factor) => cy.zoom({
+    level: cy.zoom() * factor, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 },
+  });
+  $("zoom-in").addEventListener("click", () => zoomBy(1.3));
+  $("zoom-out").addEventListener("click", () => zoomBy(1 / 1.3));
+  $("zoom-fit").addEventListener("click", fit);
+  window.addEventListener("resize", () => { cy.resize(); fit(); });
   cy.on("tap", "node.cam", (event) => showVertex(event.target.data("nid"), 0));
   cy.on("mouseover", "node.cam", (event) => { $("cy").title = event.target.data("name"); });
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => cy.style(buildStyle()));
@@ -143,14 +190,15 @@ function setRunning(isBusy, button, label) {
   if (label) button.textContent = label;
 }
 
-async function runSimulation() {
+async function runSimulation(drawSeed = false) {
+  if (drawSeed && $("p-newseed").checked) $("p-seed").value = 1 + Math.floor(Math.random() * 999999);
   state.searchToken++;
   const button = $("simulate");
   setRunning(true, button, "Gerando…");
   try {
     const sim = await api("/api/simulate", {
       seed: +$("p-seed").value, n_vehicles: +$("p-vehicles").value, ticks: +$("p-ticks").value,
-      crime_tick: +$("p-crime").value, puzzle_level: +$("p-n").value,
+      crime_tick: +$("p-crime").value, puzzle_level: +$("p-n").value, block: $("p-block").checked,
     });
     loadSimulation(sim);
   } catch (error) {
@@ -162,6 +210,14 @@ async function runSimulation() {
 
 function loadSimulation(sim) {
   state.sim = sim;
+  // The server clamps out-of-range inputs: show the values that were actually used.
+  const p = sim.params;
+  $("p-seed").value = p.seed;
+  $("p-vehicles").value = p.n_vehicles;
+  $("p-ticks").value = p.ticks;
+  $("p-crime").value = p.crime_tick;
+  $("p-n").value = p.block_level || p.puzzle_level;
+  $("p-block").checked = Boolean(p.block_level);
   state.foundRecordIds = new Set();
   state.criminalMarked = false;
   state.vertex = { id: null, offset: 0 };
@@ -184,9 +240,11 @@ function loadSimulation(sim) {
   slider.disabled = false;
   $("play").disabled = false;
   $("search").disabled = false;
+  if (window.onSimulationLoaded) window.onSimulationLoaded(sim);
   $("p-crime").max = sim.params.ticks;
   $("sim-info").textContent =
     `${sim.params.records} registros no banco · crime na câmera ${sim.crime.node} às ${clockText(sim.crime.tick)} ` +
+    (sim.params.block_level ? `· um puzzle (N = ${fmtNumber(sim.params.block_level)}) por bloco de 10 min ` : "") +
     `(run ${sim.run_id})`;
   setTick(Math.max(0, sim.crime.tick - 10));
   updateModeUi();
@@ -265,6 +323,7 @@ const MODE_NOTES = {
   fechada: "Placa conhecida: resolve os puzzles do crime e, câmera a câmera, os dos vizinhos mais prováveis até achar o carro.",
   aberta: "Placa desconhecida: decifra TODOS os registros da janela do crime, filtra pelas letras lembradas e segue cada suspeito.",
   bolo: "As câmeras alertam em claro (sem puzzle), mas só para avistamentos depois do aviso: o passado não é coberto.",
+  total: "Acesso excepcional: um quórum do Comitê de Emergência decifra por limiar as chaves de sessão das câmeras e TODOS os registros do dia abrem sem puzzle.",
 };
 
 function updateModeUi() {
@@ -272,8 +331,9 @@ function updateModeUi() {
   $("mode-note").textContent = MODE_NOTES[mode];
   $("l-hint").hidden = mode !== "aberta";
   $("l-delay").hidden = mode !== "bolo";
-  $("l-hops").hidden = mode === "bolo";
-  $("l-until").hidden = mode === "bolo";
+  $("l-members").hidden = mode !== "total";
+  $("l-hops").hidden = mode === "bolo" || mode === "total";
+  $("l-until").hidden = mode === "bolo" || mode === "total";
   $("s-hops").disabled = $("s-until").checked;
 }
 
@@ -297,20 +357,44 @@ function renderStats(result, partial) {
   const rows = [
     ...statRow("câmeras consultadas", String(t.probes)),
     ...statRow("registros decifrados", String(t.records_tested)),
-    ...statRow("tentativas de puzzle (real)", fmtNumber(t.attempts)),
+    ...statRow(`tentativas de puzzle reais (N = ${fmtNumber(state.sim.params.block_level || state.sim.params.puzzle_level)})`, fmtNumber(t.attempts)),
     ...statRow("tempo (real)", fmtDuration(t.real_seconds)),
   ];
+  if (t.rejected) rows.push(...statRow("registros rejeitados (assinatura inválida)", String(t.rejected), "bad"));
   if (!partial) {
     const e = result.estimate;
     rows.push(el("div", { class: "sep" }));
     if (result.mode === "bolo") {
       rows.push(...statRow("custo de puzzle", "nenhum"));
       rows.push(...statRow("avistamentos perdidos no atraso", String(result.extra.missed_sightings)));
+    } else if (result.mode === "total") {
+      const x = result.extra;
+      rows.push(...statRow("custo de puzzle", "nenhum (chave de sessão via quórum)"));
+      rows.push(...statRow("deputados que participaram", `${x.members.join(", ")} (limiar ${x.threshold} de ${x.committee_members})`));
+      rows.push(...statRow("chaves de sessão abertas", `${x.wraps_opened} (sessão ${x.session})`));
+      rows.push(...statRow("decifragens parciais", String(x.partial_decryptions)));
+      rows.push(...statRow("tempo do comitê", fmtDuration(x.committee_seconds)));
+      rows.push(...statRow("outras placas expostas", String(x.other_plates_exposed), "bad"));
+      rows.push(...statRow("avistamentos antes do crime", String(x.sightings_before_crime)));
     } else {
-      rows.push(...statRow(`com N = ${fmtNumber(e.realistic_n)}`, ""));
-      rows.push(...statRow("tentativas", fmtNumber(e.estimated_attempts)));
-      rows.push(...statRow("tempo (1 vCPU)", fmtDuration(e.estimated_seconds)));
-      rows.push(...statRow("custo AWS (m7g.xlarge)", fmtUsd(e.estimated_usd)));
+      if (e.blocks_solved) {
+        rows.push(...statRow("puzzles de bloco resolvidos", String(e.blocks_solved)));
+        rows.push(...statRow(`extrapolado para N = ${fmtNumber(e.realistic_t)} por bloco`, ""));
+      } else {
+        rows.push(...statRow(`extrapolado para N = ${fmtNumber(e.realistic_n)}`, ""));
+      }
+      rows.push(...statRow("tentativas, (N+1)/2 por puzzle", fmtNumber(e.estimated_attempts)));
+      rows.push(...statRow("tempo (1 núcleo)", fmtDuration(e.estimated_seconds)));
+      rows.push(...statRow("custo AWS (1 de 4 vCPUs)", fmtUsd(e.estimated_usd)));
+      if (e.mass_city_usd !== undefined) {
+        rows.push(el("div", { class: "sep" }));
+        rows.push(...statRow("varredura em massa, mesmo N", ""));
+        rows.push(...statRow(`toda a base simulada (${fmtNumber(e.mass_sim_records)} regs)`, fmtUsd(e.mass_sim_usd)));
+        rows.push(...statRow("cidade inteira, 1 ano*", fmtUsd(e.mass_city_usd), "bad"));
+        rows.push(...statRow("tempo da varredura (1 núcleo)", fmtDuration(e.mass_city_seconds)));
+        rows.push(el("div", { class: "note muted small", text:
+          `* hipótese: 5.000 câmeras × 1.000 veículos/h × 1 ano = ${fmtNumber(e.mass_city_records)} registros` }));
+      }
     }
     if (result.extra && result.extra.suspects !== undefined) {
       rows.push(...statRow("candidatas na janela", String(result.extra.candidates)));
@@ -335,7 +419,18 @@ function renderStats(result, partial) {
 }
 
 function stepLabel(step) {
+  const label = baseStepLabel(step);
+  return step.rejected ? `${label} · ${step.rejected} rejeitado${step.rejected > 1 ? "s" : ""}` : label;
+}
+
+function baseStepLabel(step) {
   if (step.kind === "alert") return `alerta · câmera ${step.node} · ${clockText(step.tick)}`;
+  if (step.kind === "quorum") {
+    return `quórum · deputados ${step.members.join(", ")} · ${step.wraps_opened} chaves de sessão`;
+  }
+  if (step.kind === "open_session") {
+    return `abre sessão · câmera ${step.node} · ${step.records_tested} regs${step.found ? " · viu o carro" : ""}`;
+  }
   if (step.kind === "decrypt_window") {
     return `decifra janela · câmera ${step.node} · ${step.records_tested} regs`;
   }
@@ -359,7 +454,7 @@ async function runSearch() {
     const result = await api("/api/search", {
       run_id: state.sim.run_id, mode: $("s-mode").value, hint_len: +$("s-hint").value,
       bolo_delay_ticks: +$("s-delay").value, max_hops: +$("s-hops").value, until_lost: $("s-until").checked,
-      realistic_n: +$("s-realistic").value,
+      realistic_n: +$("s-realistic").value, members: +$("s-members").value,
     });
     if (token !== state.searchToken) return;
     await animateSearch(result, token);
@@ -371,7 +466,7 @@ async function runSearch() {
 }
 
 async function animateSearch(result, token) {
-  const running = { probes: 0, records_tested: 0, attempts: 0, real_seconds: 0 };
+  const running = { probes: 0, records_tested: 0, attempts: 0, real_seconds: 0, rejected: 0 };
   const list = $("steps");
   // ~12 s for a long search (until-lost can have thousands of steps), 450 ms per step for short ones
   const delay = Math.max(3, Math.min(450, Math.round(12000 / result.steps.length)));
@@ -381,13 +476,15 @@ async function animateSearch(result, token) {
     if (token !== state.searchToken) return;
     if (active) active.classList.remove("active");
 
-    running.probes += step.kind === "alert" ? 0 : 1;
+    running.probes += step.kind === "alert" || step.kind === "quorum" ? 0 : 1;
     running.records_tested += step.records_tested;
     running.attempts += step.attempts;
     running.real_seconds += step.real_seconds;
+    running.rejected += step.rejected || 0;
 
     // right-hand column: records decrypted so far, to watch the cost grow camera by camera
-    const item = el("li", { class: step.found ? "found active" : "active" },
+    const item = el("li", { class: (step.found ? "found active" : "active") + (step.rejected ? " rejected" : ""),
+        title: step.rejected ? `registro(s) ${step.rejected_ids.join(", ")} rejeitado(s): assinatura inválida` : false },
       el("span", { text: stepLabel(step) }),
       el("span", { class: "mono", text: `Σ ${running.records_tested}`, title: "registros decifrados até aqui" }),
     );
@@ -398,7 +495,7 @@ async function animateSearch(result, token) {
 
     cy.getElementById(`n${step.node}`).addClass(step.found ? "found" : "visited");
     if (step.from_node !== null && step.from_node !== undefined) {
-      cy.getElementById(`e${step.from_node}-${step.node}`).addClass("probe");
+      edgeOf(step.from_node, step.node).addClass("probe");
     }
     if (step.record_id) state.foundRecordIds.add(step.record_id);
     if (step.found && step.tick !== null && step.tick !== undefined) setTick(step.tick);
@@ -408,7 +505,7 @@ async function animateSearch(result, token) {
 
   for (const path of result.paths) {
     for (let i = 0; i + 1 < path.nodes.length; i++) {
-      const edge = cy.getElementById(`e${path.nodes[i][0]}-${path.nodes[i + 1][0]}`);
+      const edge = edgeOf(path.nodes[i][0], path.nodes[i + 1][0]);
       edge.removeClass("probe").addClass(path.is_criminal ? "trail" : "trail-other");
     }
   }
@@ -422,9 +519,30 @@ function shorten(text, size) {
   return text.length > size ? `${text.slice(0, size)}…` : text;
 }
 
+// "2026-01-01T08:1#0" (10-minute slot, sequence) -> "08:10–08:19"
+function blockLabel(label) {
+  if (!label) return "—";
+  const [slot, seq] = label.split("#");
+  if (slot.length !== 15) return label;
+  const hh = slot.slice(11, 13), m = slot.slice(14, 15);
+  return `${hh}:${m}0–${hh}:${m}9` + (seq && seq !== "0" ? ` (#${seq})` : "");
+}
+
+function blockRow(block) {
+  return el("tr", {},
+    el("td", { text: blockLabel(block.block) }),
+    el("td", { text: String(block.records) }),
+    el("td", { text: fmtNumber(block.t) }),
+    el("td", { class: "mono", text: shorten(block.c_prime, 10), title: block.c_prime }),
+    el("td", { class: "mono", text: shorten(block.check_nonce, 8), title: block.check_nonce }),
+    el("td", { class: "mono", text: shorten(block.check_tag, 10), title: block.check_tag }),
+  );
+}
+
 function recordRow(row) {
   const crime = state.sim.crime;
   const classes = [];
+  if (row.tampered) classes.push("tampered");
   if (state.foundRecordIds.has(row.record_id)) classes.push("hit");
   else if (row.camera_id === crime.node && row.tick === crime.tick) classes.push("crime");
 
@@ -435,6 +553,10 @@ function recordRow(row) {
     button.textContent = "…";
     try {
       const solved = await api(`/api/record/${row.record_id}/solve`, { run_id: state.sim.run_id });
+      if (solved.rejected) {
+        action.replaceChildren(el("span", { class: "small bad-text", text: `rejeitado: ${solved.reason}` }));
+        return;
+      }
       action.replaceChildren(el("span", {
         class: "mono", text: `${solved.plate} · ${fmtNumber(solved.attempts)} tent. · ${fmtDuration(solved.elapsed_seconds)}`,
       }));
@@ -447,10 +569,15 @@ function recordRow(row) {
   return el("tr", { class: classes.join(" ") },
     el("td", { text: String(row.record_id) }),
     el("td", { text: clockText(row.tick) }),
+    el("td", { text: blockLabel(row.block), hidden: !state.sim.params.block_level }),
     el("td", { text: String(row.n) }),
     el("td", { class: "mono", text: shorten(row.c_prime, 10), title: row.c_prime }),
     el("td", { class: "mono", text: shorten(row.nonce, 8), title: row.nonce }),
     el("td", { class: "mono", text: shorten(row.ciphertext, 14), title: row.ciphertext }),
+    el("td", {
+      class: row.signature_ok ? "sig-ok" : "sig-bad", text: row.signature_ok ? "✓" : "✗",
+      title: (row.signature_ok ? "assinatura válida: " : "assinatura NÃO confere: ") + (row.signature || "ausente"),
+    }),
     action,
   );
 }
@@ -466,6 +593,9 @@ async function showVertex(nodeId, offset) {
     $("v-meta").textContent = `${data.total} registros (mostrando ${offset + 1}–${offset + data.rows.length})`;
     $("v-note").textContent = data.note;
     $("v-rows").replaceChildren(...data.rows.map(recordRow));
+    $("v-block-col").hidden = !state.sim.params.block_level;
+    $("v-blocks").hidden = !data.blocks.length;
+    $("v-block-rows").replaceChildren(...data.blocks.map(blockRow));
     const more = $("v-more");
     more.hidden = offset + data.rows.length >= data.total;
     more.onclick = () => showVertex(nodeId, offset + data.rows.length);
@@ -475,14 +605,36 @@ async function showVertex(nodeId, offset) {
   }
 }
 
+// ---------- views (tabs) ----------
+
+const VIEWS = ["busca", "ataques", "dados"];
+const viewHooks = {}; // view name -> function called when the view is shown
+
+function showView(name) {
+  if (!VIEWS.includes(name)) name = "busca";
+  for (const view of VIEWS) $(`view-${view}`).hidden = view !== name;
+  document.querySelectorAll(".tab").forEach((tab) => {
+    const active = tab.dataset.view === name;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  if (name === "busca" && cy) { cy.resize(); cy.fit(cy.nodes(".cam"), 24); }
+  if (viewHooks[name]) viewHooks[name]();
+}
+
+window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
+
 // ---------- wiring ----------
 
-$("simulate").addEventListener("click", runSimulation);
+$("simulate").addEventListener("click", () => runSimulation(true));
+$("p-seed").addEventListener("input", () => { $("p-newseed").checked = false; });
 $("search").addEventListener("click", runSearch);
 $("s-mode").addEventListener("change", updateModeUi);
 $("s-until").addEventListener("change", updateModeUi);
 $("play").addEventListener("click", () => (state.playing ? pause() : play()));
 $("slider").addEventListener("input", (event) => { pause(); setTick(+event.target.value); });
+
+showView(location.hash.slice(1));
 
 initGraph().then(() => {
   updateModeUi();

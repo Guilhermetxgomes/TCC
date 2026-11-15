@@ -8,13 +8,25 @@
 </head>
 <body>
   <header>
-    <h1>Simulação de busca em grafo <span class="muted">· Cidade Universitária (USP)</span></h1>
-    <p class="muted">Cada vértice é uma câmera; os carros seguem as probabilidades das arestas. Clique num vértice para ver o que o banco guarda.</p>
+    <h1>Nêmesis <span class="muted">· simulação e avaliação</span></h1>
+    <nav class="tabs" role="tablist" aria-label="Telas">
+      <a href="#busca" class="tab" role="tab" data-view="busca">1 · Busca na Cidade Universitária</a>
+      <a href="#ataques" class="tab" role="tab" data-view="ataques">2 · Ataques: convencional × Nêmesis</a>
+      <a href="#dados" class="tab" role="tab" data-view="dados">3 · Dados reais de tráfego</a>
+    </nav>
   </header>
 
-  <main>
+  <main id="view-busca" class="view">
+    <p class="muted view-intro">Cada vértice é uma câmera; os carros seguem as probabilidades das arestas. Clique num vértice para ver o que o banco guarda.</p>
     <section class="map-pane">
-      <div id="cy" aria-label="Grafo da cidade"></div>
+      <div class="cy-wrap">
+        <div id="cy" aria-label="Grafo da cidade"></div>
+        <div class="zoombar" role="group" aria-label="Zoom do grafo">
+          <button id="zoom-in" type="button" aria-label="Aproximar">+</button>
+          <button id="zoom-out" type="button" aria-label="Afastar">−</button>
+          <button id="zoom-fit" type="button">enquadrar</button>
+        </div>
+      </div>
       <div class="playbar">
         <button id="play" type="button" disabled>Reproduzir</button>
         <input id="slider" type="range" min="0" max="240" step="0.1" value="0" disabled aria-label="Tempo da simulação">
@@ -35,6 +47,8 @@
         <span><i class="dot visited"></i>câmera consultada</span>
         <span><i class="dot found"></i>placa achada / alerta</span>
         <span>espessura da aresta = probabilidade</span>
+        <span>seta nas duas pontas = via nos dois sentidos</span>
+        <span>arraste para mover; zoom pelos botões</span>
       </div>
     </section>
 
@@ -46,7 +60,15 @@
           <label>carros <input id="p-vehicles" type="number" value="120" min="10" max="400"></label>
           <label>ticks (10 s) <input id="p-ticks" type="number" value="240" min="60" max="600"></label>
           <label>tick do crime <input id="p-crime" type="number" value="60" min="0"></label>
-          <label>puzzle N (real) <input id="p-n" type="number" value="1000" min="2"></label>
+          <label title="N efetivamente usado para cifrar os registros gravados no banco. As buscas resolvem estes puzzles de verdade.">
+            puzzle N real (no banco) <input id="p-n" type="number" value="1000" min="1" max="100000">
+          </label>
+          <label class="check" title="Desmarcado: cada registro tem o seu puzzle de tamanho N. Marcado: todas as capturas de uma câmera em 10 minutos compartilham um único puzzle de tamanho N; quem o resolve abre o bloco inteiro.">
+            <input id="p-block" type="checkbox"> um puzzle por bloco de 10 min
+          </label>
+          <label class="check wide" title="Com a opção marcada, cada geração sorteia uma seed nova: outro tráfego, outro carro do crime e outra rota de fuga. Desmarque para repetir exatamente a simulação da seed digitada.">
+            <input id="p-newseed" type="checkbox" checked> sortear nova seed a cada geração (novo crime e nova rota)
+          </label>
         </div>
         <button id="simulate" type="button" class="primary">Gerar simulação</button>
         <p id="sim-info" class="muted small"></p>
@@ -55,11 +77,12 @@
       <section class="card">
         <h2>2 · Busca pelo carro do crime</h2>
         <div class="grid">
-          <label>modalidade
+          <label class="wide">modalidade
             <select id="s-mode">
               <option value="fechada">Busca fechada (placa conhecida)</option>
               <option value="aberta">Busca aberta (placa desconhecida)</option>
               <option value="bolo">BOLO normal (alerta em claro)</option>
+              <option value="total">Busca total (quórum do comitê)</option>
             </select>
           </label>
           <label id="l-hint">letras da placa lembradas
@@ -73,11 +96,14 @@
           <label id="l-delay">atraso do BOLO (ticks)
             <input id="s-delay" type="number" value="2" min="0" max="60">
           </label>
+          <label id="l-members" title="Quantos membros do Comitê de Emergência participam. Abaixo do limiar a busca é recusada.">
+            deputados presentes (limiar 4 de 8) <input id="s-members" type="number" value="4" min="0" max="8">
+          </label>
           <label id="l-hops">máx. câmeras seguidas <input id="s-hops" type="number" value="6" min="1" max="20"></label>
           <label id="l-until" class="check" title="Sem limite: só para quando nenhuma câmera tem mais a placa na janela (fim da gravação ou rastro perdido).">
             <input id="s-until" type="checkbox"> seguir até perder o rastro
           </label>
-          <label>N realista (extrapolação)
+          <label title="Os puzzles resolvidos na busca usam o N real do banco. Este valor só é usado para extrapolar o custo da mesma busca com um N de produção.">N realista (extrapolação)
             <select id="s-realistic">
               <option value="1000000">10⁶</option>
               <option value="10000000" selected>10⁷</option>
@@ -102,9 +128,19 @@
           <p class="muted small" id="v-note"></p>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>id</th><th>hora</th><th>n</th><th>c_prime</th><th>nonce</th><th>ciphertext</th><th></th></tr></thead>
+              <thead><tr><th>id</th><th>hora</th><th id="v-block-col">bloco</th><th>n</th><th>c_prime</th><th>nonce</th><th>ciphertext</th><th title="Assinatura ECDSA da câmera, verificada com a chave pública registrada na instalação">assin.</th><th></th></tr></thead>
               <tbody id="v-rows"></tbody>
             </table>
+          </div>
+          <div id="v-blocks" hidden>
+            <p class="small"><strong>Puzzles de bloco desta câmera</strong>
+              <span class="muted">(tabela block_headers: um puzzle de tamanho N por intervalo de 10 min)</span></p>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>intervalo</th><th>registros</th><th>N</th><th>c_B</th><th>nonce</th><th>etiqueta</th></tr></thead>
+                <tbody id="v-block-rows"></tbody>
+              </table>
+            </div>
           </div>
           <button id="v-more" type="button" hidden>Carregar mais</button>
         </div>
@@ -112,7 +148,129 @@
     </aside>
   </main>
 
+  <section id="view-ataques" class="view page" hidden>
+    <section class="card">
+      <h2>Os mesmos ataques contra dois sistemas</h2>
+      <p class="small">Os dois sistemas guardam as <strong>mesmas capturas</strong> da simulação da tela 1
+        (<span id="a-run">sem simulação</span>). O <strong>convencional</strong> é o desenho usual de um sistema de leitura
+        de placas: placa, câmera e instante por captura, com índice por placa. Cifrar essa tabela com uma chave do servidor não
+        muda os resultados, porque quem opera o servidor, ou leva a chave junto com o banco, lê tudo. O <strong>Nêmesis</strong>
+        guarda cada placa sob um <em>puzzle</em>, com dado associado (câmera, instante) e assinatura da câmera.</p>
+      <p class="small muted">O atacante é o operador do Servidor ou quem copiou o banco. Nos ataques de leitura, os dois
+        sistemas recebem o mesmo tempo de ataque; no Nêmesis os <em>puzzles</em> são resolvidos de verdade com o N da
+        simulação, e o custo completo é extrapolado para o N realista.</p>
+      <div class="grid grid4">
+        <label class="wide">ataque
+          <select id="a-attack">
+            <option value="dump">Vazamento da base / vigilância em massa: ler todas as placas</option>
+            <option value="track">Perseguição: seguir um veículo qualquer só pela placa</option>
+            <option value="move">Álibi falso: mudar câmera e instante de um registro</option>
+            <option value="forge">Troca de placa: fazer o carro do crime sumir</option>
+          </select>
+        </label>
+        <label id="la-budget">tempo de ataque (s) <input id="a-budget" type="number" value="3" min="0.5" max="10" step="0.5"></label>
+        <label id="la-realistic">N realista (extrapolação)
+          <select id="a-realistic">
+            <option value="1000000">10⁶</option><option value="10000000" selected>10⁷</option>
+            <option value="100000000">10⁸</option><option value="1000000000">10⁹</option>
+          </select>
+        </label>
+        <label id="la-plate">placa perseguida <input id="a-plate" type="text" maxlength="7" placeholder="um veículo qualquer"></label>
+        <label id="la-fake">placa falsa <input id="a-fake" type="text" value="XYZ9Z99" maxlength="7"></label>
+        <label id="la-target">câmera destino <select id="a-target"></select></label>
+        <label id="la-shift">deslocar instante (min) <input id="a-shift" type="number" value="50" min="-600" max="600"></label>
+        <label id="la-persist" class="check wide" title="Grava a adulteração no banco do Nêmesis: as buscas da tela 1 passam a encontrar o registro adulterado e o rejeitam.">
+          <input id="a-persist" type="checkbox"> gravar a adulteração no banco do Nêmesis (as buscas da tela 1 passam a vê-la)
+        </label>
+      </div>
+      <div class="row">
+        <button id="a-run-one" type="button" class="primary" disabled>Atacar os dois sistemas</button>
+        <button id="a-run-all" type="button" disabled>Rodar os quatro ataques</button>
+        <button id="a-restore" type="button" disabled>Restaurar bancos</button>
+      </div>
+      <p id="a-note" class="muted small"></p>
+    </section>
+    <div class="versus">
+      <section class="card versus-side" id="a-conv-card">
+        <h2>Sistema convencional</h2>
+        <p class="muted small">placa em claro, indexada; sem vínculo criptográfico com câmera e instante</p>
+        <div id="a-conv" class="verdict-box muted small">Escolha um ataque.</div>
+      </section>
+      <section class="card versus-side" id="a-nem-card">
+        <h2>Nêmesis</h2>
+        <p class="muted small"><em>puzzle</em> por registro, AD = (câmera, instante) e assinatura ECDSA da câmera</p>
+        <div id="a-nem" class="verdict-box muted small">Escolha um ataque.</div>
+      </section>
+    </div>
+    <section class="card" id="a-summary-card" hidden>
+      <h2>Resumo dos ataques executados</h2>
+      <div class="table-wrap">
+        <table class="summary">
+          <thead><tr><th>ataque</th><th>convencional</th><th>Nêmesis</th></tr></thead>
+          <tbody id="a-summary"></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+
+  <section id="view-dados" class="view page" hidden>
+    <section class="card">
+      <h2>Volume real nas praças de pedágio de São Paulo</h2>
+      <p class="small">Cada praça de pedágio, em cada sentido, faz o papel de uma câmera do Nêmesis: o número de veículos que
+        passou nela numa hora é o <em>n</em> de uma janela de busca. <span id="d-source" class="muted"></span></p>
+      <div class="tiles" id="d-tiles"></div>
+    </section>
+    <div class="dados-grid">
+      <section class="card">
+        <h2>Busca com volume real</h2>
+        <div class="grid">
+          <label class="wide">lote (concessão) <select id="d-lot"></select></label>
+          <label class="wide">praça e sentido <select id="d-camera"></select></label>
+          <label>dia <input id="d-day" type="date" value="2026-03-10"></label>
+          <label>hora inicial <input id="d-hour" type="number" value="17" min="0" max="23"></label>
+          <label>janela (horas) <input id="d-hours" type="number" value="1" min="1" max="6"></label>
+          <label title="N usado de fato para cifrar e resolver os puzzles nesta execução.">N real (executado) <input id="d-demo-n" type="number" value="100" min="2" max="1000"></label>
+          <label class="wide" title="Os custos abaixo são extrapolados para este N com o tempo por tentativa medido.">N realista (extrapolação)
+            <select id="d-realistic">
+              <option value="1000000">10⁶</option><option value="10000000" selected>10⁷</option>
+              <option value="100000000">10⁸</option><option value="1000000000">10⁹</option>
+            </select>
+          </label>
+        </div>
+        <button id="d-search" type="button" class="primary" disabled>Buscar com volume real</button>
+        <p id="d-note" class="muted small">Gera, cifra e assina um registro para cada veículo que passou na janela (até 3.000; acima disso,
+          usa uma amostra e escala) e resolve os <em>puzzles</em> de verdade.</p>
+        <div id="d-result" hidden>
+          <dl class="stats" id="d-stats"></dl>
+          <div class="table-wrap">
+            <table class="summary">
+              <thead><tr><th>o que se abre</th><th>registros</th><th>tempo (1 núcleo)</th><th>custo AWS</th></tr></thead>
+              <tbody id="d-costs"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+      <section class="card chart-card">
+        <h2 id="d-day-title">Veículos por hora no dia</h2>
+        <div class="viz-legend"><span><i class="sw s1"></i>veículos no dia</span><span><i class="sw s2 line"></i>média do período na mesma hora</span><span><i class="sw win"></i>janela da busca</span></div>
+        <div id="d-chart-day" class="chart"></div>
+        <h2 id="d-period-title">Veículos por dia, janeiro a setembro de 2026</h2>
+        <p class="muted small">Clique num dia para selecioná-lo.</p>
+        <div id="d-chart-period" class="chart"></div>
+      </section>
+      <section class="card chart-card wide-card">
+        <h2>Volume médio por hora de cada praça (365 praças e sentidos)</h2>
+        <p class="muted small">Barras em ordem decrescente; a linha tracejada é a hipótese de trabalho de 1.000 veículos por hora
+          por câmera. A praça selecionada aparece destacada; clique numa barra para selecioná-la.</p>
+        <div id="d-chart-rank" class="chart"></div>
+      </section>
+    </div>
+  </section>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
+  <script src="/static/charts.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/attacks.js"></script>
+  <script src="/static/dados.js"></script>
 </body>
 </html>

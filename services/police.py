@@ -1,4 +1,5 @@
 from entities.alert import Alert
+from entities.blocklist import BlocklistFull
 
 
 class Police:
@@ -30,15 +31,24 @@ class Police:
         """
         self._subscribed_cameras.append(camera)
 
-    def issue_bolo(self, plate: str, reason: str = "", ttl_seconds: float = 24 * 3600) -> None:
+    def issue_bolo(self, plate: str, reason: str = "", ttl_seconds: float = 24 * 3600) -> int:
         """
         Broadcasts one BOLO plate to every subscribed camera in a single
         event. Each camera stores it in its own local blocklist with the
         given TTL -- this is the "cameras are notified of the blocklist"
         step from preBOLO.md.
+
+        Returns how many cameras took the plate: a camera whose blocklist
+        is full (Blocklist.max_entries) refuses it.
         """
+        accepted = 0
         for camera in self._subscribed_cameras:
-            camera.blocklist.add(plate, reason=reason, ttl_seconds=ttl_seconds)
+            try:
+                camera.blocklist.add(plate, reason=reason, ttl_seconds=ttl_seconds)
+                accepted += 1
+            except BlocklistFull:
+                pass
+        return accepted
 
     def receive_alert(self, alert: Alert) -> None:
         self.alerts_received.append(alert)

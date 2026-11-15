@@ -3,10 +3,15 @@ import random
 import string
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Optional
 
+from crypto.escrow import CameraEscrow
 from services.camera import Camera
-from services.server import Server
+from services.committee import EmergencyCommittee
 from simulation.city_graph import CityGraph
+
+if TYPE_CHECKING:  # only a type hint: lets the simulation run on simulation.memory_server too
+    from services.server import Server
 
 TICK_SECONDS = 10
 SPEED_MPS = 30 / 3.6  # nominal 30 km/h inside the campus
@@ -54,6 +59,12 @@ class World:
     vehicles: list[Vehicle]
     crime: Crime
     clock: SimClock
+    # Emergency Committee holding the escrow keys of this run (None: generated without escrow).
+    committee: Optional[EmergencyCommittee] = None
+    # Public signing key of each camera, registered at installation. This is the trust anchor
+    # for the records' signatures, so it lives here and NOT in the Servidor's database, which
+    # the tampering demo lets a dishonest operator rewrite.
+    camera_keys: dict[int, bytes] = field(default_factory=dict)
 
     def vehicle(self, vehicle_id: int) -> Vehicle:
         return self.vehicles[vehicle_id]
@@ -124,30 +135,62 @@ def pick_crime(vehicles: list[Vehicle], crime_tick: int, rng: random.Random) -> 
     raise ValueError("no vehicle has enough captures after crime_tick; lower crime_tick or increase ticks")
 
 
-def populate_database(world_vehicles: list[Vehicle], server: Server, run_id: str, puzzle_level: int,
-                      clock: SimClock) -> int:
-    """Every arrival is captured by that vertex's camera and stored encrypted, in capture order."""
+def populate_database(world_vehicles: list[Vehicle], server: "Server", run_id: str, puzzle_level: int,
+                      clock: SimClock, block_level: Optional[int] = None, block_granularity: str = "10min",
+                      committee: Optional[EmergencyCommittee] = None, session_granularity: str = "day",
+                      key_registry: Optional[dict[int, bytes]] = None) -> int:
+    """
+    Every arrival is captured by that vertex's camera and stored encrypted (and signed), in
+    capture order. The cameras' public keys are written to `key_registry`.
+    With block_level the cameras use block crumpling (one puzzle of that size per camera
+    per block_granularity slot); with a committee they escrow their session keys to it.
+    """
     cameras: dict[int, Camera] = {}
+
+    def camera_for(node: int) -> Camera:
+        if node not in cameras:
+            escrow = None
+            if committee is not None:
+                escrow = CameraEscrow(node, committee.public_key, session_granularity)
+            cameras[node] = Camera(
+                id=node, location_id=node, puzzle_level=puzzle_level, block_level=block_level,
+                block_granularity=block_granularity, escrow=escrow,
+            )
+            if key_registry is not None:
+                key_registry[node] = cameras[node].public_key
+        return cameras[node]
+
     captures = sorted(
         ((tick, vehicle.id, node, vehicle.plate) for vehicle in world_vehicles for tick, node in vehicle.arrivals)
     )
-    entries = []
-    for tick, _, node, plate in captures:
-        camera = cameras.setdefault(node, Camera(id=node, location_id=node, puzzle_level=puzzle_level))
-        entries.append((camera.encrypt_plate(plate), clock.iso(tick)))
+    # The simulated clock plays the camera's own clock: captured_at goes into the AD and the signature.
+    entries = [camera_for(node).encrypt_plate(plate, clock.iso(tick)) for tick, _, node, plate in captures]
     server.save_many(entries, run_id=run_id)
+    for camera in cameras.values():
+        server.save_block_headers(camera.drain_block_headers(), run_id=run_id)
+        server.save_session_wraps(camera.drain_session_wraps(), run_id=run_id)
     return len(entries)
 
 
-def run_simulation(graph: CityGraph, server: Server, run_id: str, n_vehicles: int = 120, ticks: int = 240,
-                   puzzle_level: int = 1000, crime_tick: int = 60, seed: int = 1) -> World:
+def run_simulation(graph: CityGraph, server: "Server", run_id: str, n_vehicles: int = 120, ticks: int = 240,
+                   puzzle_level: int = 1000, crime_tick: int = 60, seed: int = 1,
+                   block_level: Optional[int] = None, block_granularity: str = "10min", escrow: bool = True,
+                   committee_threshold: int = 4, committee_members: int = 8,
+                   session_granularity: str = "day") -> World:
     rng = random.Random(seed)
     clock = SimClock()
     vehicles = simulate_traffic(graph, n_vehicles, ticks, rng)
     crime = pick_crime(vehicles, crime_tick, rng)
-    records = populate_database(vehicles, server, run_id, puzzle_level, clock)
+    committee = EmergencyCommittee(committee_threshold, committee_members) if escrow else None
+    camera_keys: dict[int, bytes] = {}
+    records = populate_database(vehicles, server, run_id, puzzle_level, clock, block_level, block_granularity,
+                                committee, session_granularity, camera_keys)
     params = {
         "seed": seed, "n_vehicles": n_vehicles, "ticks": ticks,
         "puzzle_level": puzzle_level, "crime_tick": crime_tick, "records": records,
+        "block_level": block_level, "block_granularity": block_granularity if block_level else None,
+        "escrow": escrow, "session_granularity": session_granularity,
+        "committee_threshold": committee_threshold, "committee_members": committee_members,
     }
-    return World(run_id=run_id, params=params, vehicles=vehicles, crime=crime, clock=clock)
+    return World(run_id=run_id, params=params, vehicles=vehicles, crime=crime, clock=clock, committee=committee,
+                 camera_keys=camera_keys)
