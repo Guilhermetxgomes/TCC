@@ -1,5 +1,5 @@
 import os
-import random
+import secrets
 import hashlib
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -10,7 +10,10 @@ def generate_c_prime():
     return os.urandom(32)
 
 def generate_k(n):
-    return random.randrange(0, n)
+    # k is THE secret of the puzzle, so it must come from the OS CSPRNG. `random` is a
+    # Mersenne Twister: its state can be rebuilt from enough outputs, and whoever solved
+    # some puzzles of a camera could then predict every other k of that camera for free.
+    return secrets.randbelow(n)
 
 def derive_key(c_prime, k):
     k_bytes = k.to_bytes((k.bit_length() + 7) // 8 or 1, byteorder="big")

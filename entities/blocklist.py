@@ -1,7 +1,11 @@
 import time
-from typing import Callable
+from typing import Callable, Optional
 
 from entities.blocklist_entry import BlocklistEntry
+
+
+class BlocklistFull(Exception):
+    """The camera's blocklist reached its capacity; an entry has to expire before another fits."""
 
 
 class Blocklist:
@@ -30,15 +34,24 @@ class Blocklist:
       lazily, on the next access that touches them, so the camera never
       needs a background timer or a housekeeping task running outside its
       normal capture loop.
+
+    - An optional capacity (`max_entries`). The check against the blocklist
+      costs no puzzle, so a list without a ceiling is a free way of watching
+      as many plates as one wishes. With a ceiling, watching more plates
+      than fit means dropping others.
     """
 
-    def __init__(self, clock: Callable[[], float] = time.time):
+    def __init__(self, clock: Callable[[], float] = time.time, max_entries: Optional[int] = None):
         # The clock is injectable so that TTLs can follow a simulated time
         # (web simulation) instead of the wall clock. Default is unchanged.
         self._clock = clock
         self._entries: dict[str, BlocklistEntry] = {}
+        self.max_entries = max_entries
 
     def add(self, plate: str, reason: str = "", ttl_seconds: float = 24 * 3600) -> None:
+        self._purge_expired()
+        if self.max_entries is not None and plate not in self._entries and len(self._entries) >= self.max_entries:
+            raise BlocklistFull(f"blocklist is full ({self.max_entries} entries)")
         self._entries[plate] = BlocklistEntry(reason=reason, expires_at=self._clock() + ttl_seconds)
 
     def contains(self, plate: str) -> bool:

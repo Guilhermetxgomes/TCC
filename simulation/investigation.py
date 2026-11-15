@@ -9,19 +9,35 @@ The three ways of looking for the criminal's car after the crime:
   traced like in busca_fechada.
 - bolo: the police broadcasts the plate to every camera, which then alert in the clear
   (no puzzle) -- but only about sightings after the broadcast.
+- busca_total: exceptional access. A quorum of the Emergency Committee threshold-decrypts
+  the session keys the cameras escrowed, and every record of the session is opened
+  without any puzzle -- the criminal's whole route, and everybody else's.
+
+Every record is checked against its camera's signature (World.camera_keys) before any
+puzzle is attempted; a record that fails -- moved to another camera or instant, or
+re-encrypted with another plate by someone who solved its puzzle -- is rejected and
+reported in the step (`rejected`), never followed.
+
+With block crumpling (World.params["block_level"]) busca_fechada and busca_aberta first
+solve the puzzle of each block they touch (once per camera and time slot) and then the
+records inside it.
 
 Every function returns the list of `steps` that the web UI animates, the traced paths and
 the cost (measured with the real, small puzzle_level + extrapolated to a realistic one).
 """
 import contextlib
 import io
-from typing import Optional
+import time
+from typing import TYPE_CHECKING, Optional
 
+from crypto.block_crumpling import solve_block
+from crypto.escrow import open_with_session_key, time_slot
 from crypto.puzzle import solve_puzzle
+from crypto.signing import verify_record
 from entities.blocklist import Blocklist
 from services.camera import Camera
+from services.committee import Scope
 from services.police import Police
-from services.server import Server
 from simulation import costs
 from simulation.city_graph import CityGraph
 from simulation.engine import World, travel_window
@@ -30,15 +46,20 @@ DEFAULT_WINDOW_TICKS = 6  # +-1 min around the crime
 DEFAULT_MAX_HOPS = 6
 DEFAULT_MAX_SUSPECTS = 30
 DEFAULT_REALISTIC_N = 10_000_000
+DEFAULT_REALISTIC_T = 10_000_000_000  # block puzzle: ~1000 records/slot x DEFAULT_REALISTIC_N
+
+if TYPE_CHECKING:  # only a type hint: lets the simulation run on simulation.memory_server too
+    from services.server import Server
 
 
 class Investigator:
-    def __init__(self, graph: CityGraph, server: Server, world: World):
+    def __init__(self, graph: CityGraph, server: "Server", world: World):
         self.graph = graph
         self.server = server
         self.world = world
         self.clock = world.clock
         self.run_id = world.run_id
+        self._block_keys: dict[tuple[int, str], bytes] = {}  # blocks this investigator already paid for
 
     # -- building blocks ------------------------------------------------
 
@@ -53,17 +74,52 @@ class Investigator:
         step = {
             "kind": "probe", "node": node, "from_tick": tick_from, "to_tick": tick_to,
             "records_in_window": len(rows), "records_tested": 0, "attempts": 0,
+            "blocks_solved": 0, "block_attempts": 0, "rejected": 0, "rejected_ids": [],
             "real_seconds": 0.0, "found": False, "tick": None, "record_id": None,
         }
         for row in rows:
-            result = solve_puzzle(row["record"])
-            step["records_tested"] += 1
-            step["attempts"] += result["attempts"]
-            step["real_seconds"] += result["elapsed_seconds"]
-            if result["plate"] == plate:
+            result = self._solve(row, step)
+            if result is not None and result["plate"] == plate:
                 step.update(found=True, tick=self.clock.tick_of(row["captured_at"]), record_id=row["record_id"])
                 break
         return step
+
+    def _authentic(self, row: dict, step: dict) -> bool:
+        """Checks the camera's signature; a record that fails is counted in `step` and skipped."""
+        started = time.perf_counter()
+        ok = verify_record(row["record"], self.world.camera_keys.get(row["record"].camera_id))
+        step["real_seconds"] += time.perf_counter() - started
+        if not ok:
+            step["rejected"] = step.get("rejected", 0) + 1
+            step.setdefault("rejected_ids", []).append(row["record_id"])
+        return ok
+
+    def _solve(self, row: dict, step: dict) -> Optional[dict]:
+        """
+        Opens one record by brute force and adds its cost to `step`; returns None (and counts
+        the record as rejected) when its signature does not check. A record inside a
+        crumpled block needs the block key first: the block puzzle is solved once per
+        (camera, block) and reused by every later record of that block in this investigation.
+        """
+        if not self._authentic(row, step):
+            return None
+        record = row["record"]
+        prefix = b""
+        if record.block is not None:
+            cache_key = (record.camera_id, record.block)
+            if cache_key not in self._block_keys:
+                solved = solve_block(self.server.get_block_header(self.run_id, record.camera_id, record.block))
+                self._block_keys[cache_key] = solved["key"]
+                step["blocks_solved"] += 1
+                step["block_attempts"] += solved["attempts"]
+                step["attempts"] += solved["attempts"]
+                step["real_seconds"] += solved["elapsed_seconds"]
+            prefix = self._block_keys[cache_key]
+        result = solve_puzzle(record, key_prefix=prefix)
+        step["records_tested"] += 1
+        step["attempts"] += result["attempts"]
+        step["real_seconds"] += result["elapsed_seconds"]
+        return result
 
     def _trace(self, plate: str, node: int, tick: int, max_hops: Optional[int], suspect: Optional[str] = None):
         """
@@ -108,7 +164,7 @@ class Investigator:
     # -- modalities -----------------------------------------------------
 
     def busca_fechada(self, window_ticks: int = DEFAULT_WINDOW_TICKS, max_hops: Optional[int] = DEFAULT_MAX_HOPS,
-                      realistic_n: int = DEFAULT_REALISTIC_N) -> dict:
+                      realistic_n: int = DEFAULT_REALISTIC_N, realistic_t: int = DEFAULT_REALISTIC_T) -> dict:
         crime = self.world.crime
         first = self._probe(crime.node, crime.tick - window_ticks, crime.tick + window_ticks, crime.plate)
         first.update(from_node=None, p=None, suspect=crime.plate)
@@ -117,24 +173,24 @@ class Investigator:
             trace_steps, path, stop = self._trace(crime.plate, crime.node, first["tick"], max_hops, crime.plate)
             steps += trace_steps
             paths.append({"plate": crime.plate, "is_criminal": True, "nodes": path, "stopped_by": stop})
-        return self._result("fechada", steps, paths, realistic_n)
+        return self._result("fechada", steps, paths, realistic_n, realistic_t=realistic_t)
 
     def busca_aberta(self, hint_len: int = 3, window_ticks: int = DEFAULT_WINDOW_TICKS,
                      max_hops: Optional[int] = DEFAULT_MAX_HOPS, max_suspects: int = DEFAULT_MAX_SUSPECTS,
-                     realistic_n: int = DEFAULT_REALISTIC_N) -> dict:
+                     realistic_n: int = DEFAULT_REALISTIC_N, realistic_t: int = DEFAULT_REALISTIC_T) -> dict:
         crime = self.world.crime
         rows = self._window(crime.node, crime.tick - window_ticks, crime.tick + window_ticks)
         decrypt = {
             "kind": "decrypt_window", "node": crime.node, "from_tick": crime.tick - window_ticks,
             "to_tick": crime.tick + window_ticks, "records_in_window": len(rows),
-            "records_tested": 0, "attempts": 0, "real_seconds": 0.0, "found": False,
+            "records_tested": 0, "attempts": 0, "blocks_solved": 0, "block_attempts": 0,
+            "rejected": 0, "rejected_ids": [], "real_seconds": 0.0, "found": False,
         }
         candidates = []  # (plate, tick) decrypted from the window
         for row in rows:
-            result = solve_puzzle(row["record"])
-            decrypt["records_tested"] += 1
-            decrypt["attempts"] += result["attempts"]
-            decrypt["real_seconds"] += result["elapsed_seconds"]
+            result = self._solve(row, decrypt)
+            if result is None:
+                continue
             candidates.append((result["plate"], self.clock.tick_of(row["captured_at"])))
 
         hint = crime.plate[:hint_len]  # what a witness remembers
@@ -145,7 +201,7 @@ class Investigator:
             trace_steps, path, stop = self._trace(plate, crime.node, tick, max_hops, plate)
             steps += trace_steps
             paths.append({"plate": plate, "is_criminal": plate == crime.plate, "nodes": path, "stopped_by": stop})
-        result = self._result("aberta", steps, paths, realistic_n)
+        result = self._result("aberta", steps, paths, realistic_n, realistic_t=realistic_t)
         result["extra"] = {
             "hint": hint, "candidates": len(candidates), "suspects": len(suspects),
             "suspects_traced": min(len(suspects), max_suspects),
@@ -195,18 +251,113 @@ class Investigator:
         result["extra"] = {"bolo_tick": bolo_tick, "ttl_ticks": ttl_ticks, "missed_sightings": len(missed)}
         return result
 
+    def busca_total(self, member_indexes: Optional[list[int]] = None,
+                    camera_ids: Optional[list[int]] = None) -> dict:
+        """
+        Exceptional access: the committee members in `member_indexes` (default: the first
+        t) threshold-decrypt the escrowed session keys of the crime's session -- for every
+        camera, or only for `camera_ids` -- and each record of those cameras in that
+        session is opened with one HMAC instead of a puzzle. Raises
+        services.committee.QuorumError when fewer than t members take part.
+
+        The cost is not computational but institutional (a quorum has to agree), and the
+        exposure is total: `extra` reports how many plates other than the criminal's
+        were revealed.
+        """
+        committee = self.world.committee
+        if committee is None:
+            raise ValueError("this simulation was generated without escrow; busca_total is not available")
+        crime = self.world.crime
+        crime_time = self.clock.iso(crime.tick)
+        period = time_slot(crime_time, "month")
+        session = time_slot(crime_time, self.world.params["session_granularity"])
+        if member_indexes is None:
+            member_indexes = list(range(1, committee.threshold + 1))
+        scope = Scope(
+            period=period, sessions=frozenset({session}),
+            camera_ids=frozenset(camera_ids) if camera_ids is not None else None,
+            reason=f"crime at camera {crime.node}, {crime_time}",
+        )
+
+        started = time.perf_counter()
+        session_keys = committee.open_session_keys(
+            scope, self.server.get_session_wraps(self.run_id, period, session), member_indexes
+        )
+        committee_seconds = time.perf_counter() - started
+        activation = committee.activations[-1]
+        steps = [{
+            "kind": "quorum", "node": crime.node, "tick": None, "found": False, "records_tested": 0,
+            "attempts": 0, "real_seconds": committee_seconds, "members": activation["members"],
+            "wraps_opened": activation["wraps_opened"],
+        }]
+
+        plates: set[str] = set()
+        sightings = []  # (tick, node) of the criminal's plate, from every opened camera
+        for (camera_id, _), session_key in sorted(session_keys.items()):
+            rows = self.server.get_rows_in_session(self.run_id, camera_id, session)
+            step = {
+                "kind": "open_session", "node": camera_id, "tick": None, "found": False, "record_id": None,
+                "records_in_window": len(rows), "records_tested": 0, "attempts": 0, "real_seconds": 0.0,
+                "rejected": 0, "rejected_ids": [],
+            }
+            started = time.perf_counter()
+            headers, hit_record = {}, None
+            for row in rows:
+                if not self._authentic(row, step):
+                    continue
+                record = row["record"]
+                header = None
+                if record.block is not None:
+                    if record.block not in headers:
+                        headers[record.block] = self.server.get_block_header(self.run_id, camera_id, record.block)
+                    header = headers[record.block]
+                plate = open_with_session_key(record, session_key, header)
+                plates.add(plate)
+                if plate == crime.plate:
+                    sightings.append((self.clock.tick_of(row["captured_at"]), camera_id))
+                    hit_record = hit_record or row["record_id"]
+            step.update(found=hit_record is not None, record_id=hit_record,
+                        records_tested=len(rows) - step["rejected"], real_seconds=time.perf_counter() - started)
+            steps.append(step)
+
+        sightings.sort()
+        path = [(node, tick) for tick, node in sightings if tick >= crime.tick]
+        paths = [{"plate": crime.plate, "is_criminal": True, "nodes": path, "stopped_by": None}]
+        expected = None
+        if camera_ids is not None:  # only the opened cameras can be expected to report
+            expected = [(node, tick) for node, tick in self._true_escape() if node in scope.camera_ids]
+        result = self._result("total", steps, paths, DEFAULT_REALISTIC_N, expected=expected)
+        result["estimate"] = costs.estimate(0, 0, 0.0, DEFAULT_REALISTIC_N)  # no puzzle is solved on this path
+        result["extra"] = {
+            "period": period, "session": session,
+            "threshold": committee.threshold, "committee_members": len(committee.members),
+            "members": activation["members"], "wraps_opened": activation["wraps_opened"],
+            "partial_decryptions": activation["partial_decryptions"], "committee_seconds": committee_seconds,
+            "plates_exposed": len(plates), "other_plates_exposed": len(plates - {crime.plate}),
+            "sightings_before_crime": sum(1 for tick, _ in sightings if tick < crime.tick),
+        }
+        return result
+
     # -- result ---------------------------------------------------------
 
     def _result(self, mode: str, steps: list[dict], paths: list[dict], realistic_n: int,
-                expected: Optional[list[tuple[int, int]]] = None) -> dict:
+                expected: Optional[list[tuple[int, int]]] = None, realistic_t: int = DEFAULT_REALISTIC_T) -> dict:
         totals = {
-            "probes": sum(1 for s in steps if s["kind"] in ("probe", "decrypt_window")),
+            "probes": sum(1 for s in steps if s["kind"] in ("probe", "decrypt_window", "open_session")),
             "records_tested": sum(s["records_tested"] for s in steps),
             "attempts": sum(s["attempts"] for s in steps),
+            "blocks_solved": sum(s.get("blocks_solved", 0) for s in steps),
+            "block_attempts": sum(s.get("block_attempts", 0) for s in steps),
+            "rejected": sum(s.get("rejected", 0) for s in steps),
             "real_seconds": sum(s["real_seconds"] for s in steps),
         }
+        block_mode = self.world.params.get("block_level") is not None
+        if block_mode and self.world.params["puzzle_level"] == 1:
+            realistic_n = 1  # pure block crumpling: the records carry no puzzle of their own
         estimate = costs.estimate(
-            totals["records_tested"], totals["attempts"], totals["real_seconds"], realistic_n
+            totals["records_tested"], totals["attempts"], totals["real_seconds"], realistic_n,
+            totals["blocks_solved"], realistic_t if block_mode else 0,
+            total_records=0 if block_mode else self.world.params["records"],
         )
         truth = expected if expected is not None else self._true_escape()
         criminal_path = next((p["nodes"] for p in paths if p["is_criminal"]), [])
