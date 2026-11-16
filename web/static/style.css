@@ -303,3 +303,21 @@ table.summary td { white-space: normal; font-size: 12px; vertical-align: top; }
 .sw.line { height: 2px; vertical-align: 3px; }
 .sw.win { background: color-mix(in srgb, var(--series-2) 14%, transparent); border: 1px solid var(--border); }
 .row button, .row button.primary { width: auto; flex: 0 0 auto; padding-left: 16px; padding-right: 16px; }
+
+/* ---------- view 4: governance ---------- */
+.steps li.denied { color: var(--criminal); }
+.audit-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+.table-wrap.tall { max-height: 420px; }
+table.summary tr.broken td { background: color-mix(in srgb, var(--criminal) 14%, transparent); }
+table.summary tr.denied td { color: var(--muted); }
+table.summary td.mono, .hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.checkpoint-mark { color: var(--found); font-weight: 700; margin-left: 4px; }
+.disc { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+.disc li { margin: 3px 0; overflow-wrap: anywhere; }
+.disc .grave { color: var(--criminal); }
+.disc .atencao { color: var(--muted); }
+.checks { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
+.checks li { margin: 4px 0; overflow-wrap: anywhere; }
+.checks li::before { content: "✗ "; color: var(--muted); }
+.checks li.hit::before { content: "✓ "; color: var(--found); }
+@media (max-width: 900px) { .audit-grid { grid-template-columns: 1fr; } }
