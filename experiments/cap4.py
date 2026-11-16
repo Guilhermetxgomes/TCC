@@ -9,6 +9,7 @@ No database needed: everything runs in memory on the real crypto code.
     python -m experiments.cap4 e5      # targeted search vs. mass surveillance (extrapolation)
     python -m experiments.cap4 e6      # the same attacks against a conventional backend and the Nêmesis
     python -m experiments.cap4 e7      # real hourly volumes of the São Paulo toll plazas (ARTESP)
+    python -m experiments.cap4 e8      # governance: tokens, chained log, reconciliation, attacks
     python -m experiments.cap4 all
 
 Each experiment writes experiments/resultados/<name>.csv; e3 and e5 also write a
@@ -25,7 +26,6 @@ import sys
 import time
 from pathlib import Path
 
-from crypto import p256, threshold
 from crypto.block_crumpling import solve_block
 from crypto.escrow import CameraEscrow, open_with_session_key
 from crypto.puzzle import solve_puzzle
@@ -133,7 +133,7 @@ def e2(captures: int = 3000) -> None:
                 "bytes_por_registro": len(record.c_prime) + len(record.nonce) + len(record.ciphertext)
                 + len(record.signature or b""),
                 "bytes_por_bloco": sum(len(h.c_prime) + len(h.check_nonce) + len(h.check_tag) for h in headers),
-                "bytes_por_sessao": sum(len(w.r) + len(w.nonce) + len(w.wrapped) for w in wraps),
+                "bytes_por_sessao": sum(len(w.wrapped) for w in wraps),
             })
     started = time.perf_counter()
     for day in range(1, 21):  # one new session (key wrap) per day
@@ -285,31 +285,33 @@ def timed_ms(function, repetitions: int) -> float:
     return (time.perf_counter() - started) / repetitions * 1e3
 
 
-def e4(configurations=((2, 3), (4, 8), (8, 15)), repetitions: int = 15, records: int = 3000) -> None:
+def e4(configurations=((2, 3), (4, 8), (8, 15)), repetitions: int = 200, records: int = 3000) -> None:
+    """
+    Busca Total built from library primitives: X25519 HPKE (`cryptography`) for the camera's
+    wrap, Shamir (PyCryptodome) over a 128-bit KEK that seals the month's X25519 key.
+    """
+    from crypto.escrow import unwrap_session_key
     rows = []
     for t, n in configurations:
-        public, shares = threshold.deal(t, n)
-        r_point, key = threshold.encapsulate(public, b"ctx")
-        partials = [threshold.partial_decrypt(share, r_point) for share in shares[:t]]
-        proof = threshold.prove_partial(shares[0], r_point, partials[0])
-        assert threshold.combine(public, r_point, partials, b"ctx") == key
+        committee = EmergencyCommittee(t, n)
+        committee.public_key("2026-01")
+        escrow = CameraEscrow(1, committee.public_key)
+        escrow.session_key("2026-01-01T08:00:00+00:00")
+        wrap = escrow.drain_wraps()[0]
+        scope = Scope(period="2026-01")
+        shares = [committee.members[i].release_share(scope) for i in range(1, t + 1)]
+        private_key = committee._recover("2026-01", shares)
         rows.append({
             "t": t, "n": n,
-            "gerar_chave_ms": round(timed_ms(lambda: threshold.deal(t, n), 3), 2),
-            "embrulhar_camera_ms": round(timed_ms(lambda: threshold.encapsulate(public, b"ctx"), repetitions), 2),
-            "decifragem_parcial_ms": round(timed_ms(lambda: threshold.partial_decrypt(shares[0], r_point), repetitions), 2),
-            "prova_ms": round(timed_ms(lambda: threshold.prove_partial(shares[0], r_point, partials[0]), repetitions), 2),
-            "verificar_prova_ms": round(timed_ms(lambda: threshold.verify_partial(public, r_point, partials[0], proof), repetitions), 2),
-            "combinar_t_parciais_ms": round(timed_ms(lambda: threshold.combine(public, r_point, partials, b"ctx"), repetitions), 2),
-            "abrir_1_embrulho_ms": None,
-            "shamir_reconstruir_ms": round(timed_ms(lambda: threshold.reconstruct_secret(shares[:t]), repetitions), 3),
-            "shamir_abrir_1_embrulho_ms": None,
+            "gerar_selar_repartir_ms": round(timed_ms(lambda: EmergencyCommittee(t, n).public_key("2026-01"), 50), 3),
+            "embrulhar_camera_ms": round(timed_ms(
+                lambda: CameraEscrow(1, committee.public_key).session_key("2026-01-01T08:00:00+00:00"), repetitions), 3),
+            "entregar_fragmento_ms": round(timed_ms(lambda: committee.members[1].release_share(scope), repetitions), 4),
+            "reunir_t_fragmentos_ms": round(timed_ms(lambda: committee._recover("2026-01", shares), repetitions), 3),
+            "abrir_1_embrulho_ms": round(timed_ms(lambda: unwrap_session_key(wrap, private_key), repetitions), 3),
+            "bytes_embrulho": len(wrap.wrapped),
+            "bytes_fragmento": len(shares[0][1]),
         })
-        secret = threshold.reconstruct_secret(shares[:t])
-        rows[-1]["shamir_abrir_1_embrulho_ms"] = round(
-            timed_ms(lambda: threshold.decapsulate(secret, r_point, b"ctx"), repetitions), 2)
-        rows[-1]["abrir_1_embrulho_ms"] = round(
-            t * rows[-1]["decifragem_parcial_ms"] + rows[-1]["combinar_t_parciais_ms"], 2)
     write_csv("e4_comite", rows)
 
     # Once a session key is open: records per second through the escrow path.
@@ -542,7 +544,100 @@ def plot_e7(means: list[float], profile: list[float], busiest: str) -> None:
     plt.close(fig)
 
 
-EXPERIMENTS = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5, "e6": e6, "e7": e7}
+# ---------------------------------------------------------------------------------------
+# E8 -- governance: tokens, chained log, declarations, reconciliation, attacks
+# ---------------------------------------------------------------------------------------
+
+
+def e8(seed: int = 1, repetitions: int = 300, chain_sizes=(1_000, 10_000, 100_000)) -> None:
+    """Same simulation as the web UI (seed 1, 120 vehicles, N = 1000); in memory, no Postgres."""
+    from crypto import hashchain
+    from crypto.tokens import SigningKey, verify_token
+    from services.auditor import Auditor
+    from services.judge import LegalAuthorizer
+    from simulation import governance_attacks
+    from simulation.city_graph import CityGraph
+    from simulation.engine import run_simulation
+    from simulation.investigation import Investigator
+    from simulation.memory_server import MemoryServer
+
+    # -- unit costs ----------------------------------------------------------------------
+    judge = LegalAuthorizer()
+    now = "2026-01-01T10:00:00+00:00"
+    issue_ms = timed_ms(lambda: judge.issue_fechada("PC-1", "ABC1D23", now), repetitions)
+    token = judge.issued[-1]
+    verify_ms = timed_ms(lambda: verify_token(token, judge.public_key), repetitions)
+    key = SigningKey()
+    head = [None]
+
+    def append():
+        head[0] = hashchain.link(head[0], {"kind": "release", "token_id": token.token_id, "records": 3,
+                                           "detail": {"record_ids": [1, 2, 3]}}, key)
+    append_ms = timed_ms(append, repetitions)
+    rows = [{"operacao": "emitir e assinar um token (juiz)", "ms": f"{issue_ms:.3f}"},
+            {"operacao": "verificar um token (Servidor)", "ms": f"{verify_ms:.3f}"},
+            {"operacao": "encadear e assinar uma entrada do log", "ms": f"{append_ms:.3f}"}]
+    for size in chain_sizes:
+        entries, h = [], None
+        for i in range(size):
+            h = hashchain.link(h, {"kind": "release", "records": i % 7, "detail": {}}, key)
+            entries.append(h)
+        started = time.perf_counter()
+        assert hashchain.verify(entries)["ok"]
+        hash_only = time.perf_counter() - started
+        started = time.perf_counter()
+        assert hashchain.verify(entries, [{"seq": size, "hash": entries[-1]["hash"]}], key.public_key_bytes)["ok"]
+        signed = time.perf_counter() - started
+        rows.append({"operacao": f"verificar cadeia de {size} entradas (só hash)", "ms": f"{hash_only * 1000:.1f}"})
+        rows.append({"operacao": f"verificar cadeia de {size} entradas (hash + assinatura)", "ms": f"{signed * 1000:.1f}"})
+
+    # -- the searches of the web UI, with governance on --------------------------------------
+    graph, server = CityGraph.load(), MemoryServer()
+    world = run_simulation(graph, server, "e8", n_vehicles=120, ticks=240, puzzle_level=1000, crime_tick=60, seed=seed)
+    searches = []
+    for label, run in (("Busca Fechada", lambda i: i.busca_fechada()),
+                       ("Busca Aberta (3 letras)", lambda i: i.busca_aberta(hint_len=3)),
+                       ("Busca Aberta (sem dica)", lambda i: i.busca_aberta(hint_len=0)),
+                       ("Busca Total", lambda i: i.busca_total())):
+        result = run(Investigator(graph, server, world))
+        g, t = result["governance"], result["totals"]
+        searches.append({
+            "busca": label, "tokens": len(g["tokens"]), "entradas_log": g["log_entries"],
+            "registros_liberados": sum(s.get("records_in_window", 0) for s in result["steps"]),
+            "decifragens_declaradas": g["declarations"], "governanca_ms": f"{g['overhead_seconds'] * 1000:.1f}",
+            "busca_ms": f"{t['real_seconds'] * 1000:.1f}",
+            "governanca_por_entrada_ms": f"{g['overhead_seconds'] * 1000 / max(g['log_entries'], 1):.2f}",
+        })
+    auditor = Auditor.for_world(world)
+    started = time.perf_counter()
+    report = auditor.reconcile(world, server)
+    reconcile_ms = (time.perf_counter() - started) * 1000
+    declared = max(report["totals"]["declared"], 1)
+    rows.append({"operacao": f"reconciliar as 4 buscas ({report['totals']['log_entries']} entradas, "
+                             f"{report['totals']['declared']} declarações, {report['totals']['grave']} discrepâncias)",
+                 "ms": f"{reconcile_ms:.1f}"})
+    rows.append({"operacao": "por declaração conferida (aprox., inclui o resto da reconciliação)",
+                 "ms": f"{reconcile_ms / declared:.2f}"})
+    write_csv("e8_governanca_custos", rows)
+    write_csv("e8_governanca_buscas", searches)
+
+    # -- attacks -----------------------------------------------------------------------------
+    attacks_rows, undo = [], []
+    for attack in governance_attacks.ATTACKS:
+        result = governance_attacks.run(attack, graph, server, world)
+        if result["undo"]:
+            undo.append(result["undo"])
+        attacks_rows.append({
+            "ataque": result["title"], "contido": "sim" if result["contained"] else "não",
+            "verificacoes": "; ".join(f"{c['label']}: {'detecta' if c['detected'] else 'não detecta'}"
+                                      for c in result["checks"]),
+            "resumo": result["headline"],
+        })
+    governance_attacks.restore(server, world, undo)
+    write_csv("e8_governanca_ataques", attacks_rows)
+
+
+EXPERIMENTS = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5, "e6": e6, "e7": e7, "e8": e8}
 
 if __name__ == "__main__":
     chosen = sys.argv[1:] or ["all"]

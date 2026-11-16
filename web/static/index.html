@@ -13,6 +13,7 @@
       <a href="#busca" class="tab" role="tab" data-view="busca">1 · Busca na Cidade Universitária</a>
       <a href="#ataques" class="tab" role="tab" data-view="ataques">2 · Ataques: convencional × Nêmesis</a>
       <a href="#dados" class="tab" role="tab" data-view="dados">3 · Dados reais de tráfego</a>
+      <a href="#auditoria" class="tab" role="tab" data-view="auditoria">4 · Auditoria</a>
     </nav>
   </header>
 
@@ -98,6 +99,9 @@
           </label>
           <label id="l-members" title="Quantos membros do Comitê de Emergência participam. Abaixo do limiar a busca é recusada.">
             deputados presentes (limiar 4 de 8) <input id="s-members" type="number" value="4" min="0" max="8">
+          </label>
+          <label id="l-budget" title="Teto de registros que o Servidor pode liberar sob cada token de Busca Fechada. Esgotado, o Servidor recusa a janela seguinte e a busca para.">
+            orçamento do token (registros) <input id="s-budget" type="number" value="500" min="1" max="100000">
           </label>
           <label id="l-hops">máx. câmeras seguidas <input id="s-hops" type="number" value="6" min="1" max="20"></label>
           <label id="l-until" class="check" title="Sem limite: só para quando nenhuma câmera tem mais a placa na janela (fim da gravação ou rastro perdido).">
@@ -267,10 +271,110 @@
     </div>
   </section>
 
+  <section id="view-auditoria" class="view page" hidden>
+    <section class="card">
+      <h2>Governança: tokens, log de decodificação e reconciliação</h2>
+      <p class="small">Toda busca da tela 1 pede um <strong>token</strong> ao Autorizador Legal (juiz), assinado com ECDSA P-256.
+        O <strong>Servidor</strong> verifica o token antes de liberar qualquer registro cifrado e grava cada liberação, ou recusa,
+        num <strong>log encadeado por hash</strong>. O investigador <strong>declara</strong> ao Auditor cada registro que abriu,
+        com a solução <em>k</em> do <em>puzzle</em>, que o Auditor confere com uma única decifragem. A Busca Total só acontece
+        depois de publicada no <strong>boletim público</strong>. <span id="g-run" class="muted">sem simulação</span></p>
+      <div class="tiles" id="g-tiles"></div>
+      <div class="row">
+        <button id="g-refresh" type="button" disabled>Atualizar</button>
+      </div>
+    </section>
+
+    <div class="audit-grid">
+      <section class="card">
+        <h2>Reconciliação do Auditor</h2>
+        <p class="muted small">Cruza o <strong>autorizado</strong> (tokens do juiz), o <strong>liberado</strong> (log do Servidor,
+          conferido contra os checkpoints do Conselho) e o <strong>declarado</strong> (decifragens informadas pelo investigador).</p>
+        <div id="g-verdict" class="verdict-box muted small">Gere uma simulação e rode uma busca.</div>
+      </section>
+      <section class="card">
+        <h2>Ataques à governança</h2>
+        <div class="grid">
+          <label class="wide">ataque
+            <select id="g-attack">
+              <option value="expired">Usar um token vencido</option>
+              <option value="scope">Usar um token de Busca Aberta fora da janela autorizada</option>
+              <option value="operator">Usar o token de outro policial</option>
+              <option value="budget">Estourar o orçamento de uma Busca Fechada</option>
+              <option value="forged">Adulterar o token (orçamento e prazo)</option>
+              <option value="log_delete">Operador do Servidor apaga uma liberação do log</option>
+              <option value="log_rewrite">Operador apaga e reescreve (e reassina) o log</option>
+              <option value="misuse">Token da placa do crime usado para seguir outra pessoa</option>
+              <option value="total_unpublished">Busca Total sem publicação no boletim</option>
+              <option value="offlog_dump">Operador copia o banco por fora do portão</option>
+            </select>
+          </label>
+          <label id="lg-budget">orçamento (registros) <input id="g-budget" type="number" value="3" min="1" max="1000"></label>
+        </div>
+        <div class="row">
+          <button id="g-run-one" type="button" class="primary" disabled>Executar ataque</button>
+          <button id="g-restore" type="button" disabled>Restaurar log</button>
+        </div>
+        <p id="g-note" class="muted small"></p>
+        <div id="g-attack-result" class="verdict-box muted small">Escolha um ataque.</div>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>Tokens emitidos pelo Autorizador Legal</h2>
+      <div class="table-wrap">
+        <table class="summary">
+          <thead><tr><th>token</th><th>modalidade</th><th>operador</th><th>escopo autorizado</th><th>validade</th>
+            <th title="registros liberados pelo Servidor sob o token">liberados</th><th>recusas</th>
+            <th title="decifragens declaradas pelo investigador e conferidas pelo Auditor">declarados / conferidos</th><th>alertas</th></tr></thead>
+          <tbody id="g-tokens"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Log de decodificação do Servidor</h2>
+      <p class="muted small">Cada entrada guarda o hash da anterior e é assinada pelo Servidor. O Conselho copia o último hash
+        para fora do banco ao fim de cada busca (checkpoint, ◆). <span id="g-chain"></span></p>
+      <div class="table-wrap tall">
+        <table class="summary">
+          <thead><tr><th>seq</th><th>instante</th><th>tipo</th><th>token</th><th>operador</th><th>câmera</th><th>janela</th>
+            <th>regs</th><th>hash anterior</th><th>hash</th><th>cadeia</th></tr></thead>
+          <tbody id="g-log"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="audit-grid">
+      <section class="card">
+        <h2>Boletim público da Busca Total</h2>
+        <p class="muted small">Publicado antes da decifragem (ativação) e depois dela (fechamento). Sem o recibo da
+          publicação, os membros do Comitê recusam entregar seus fragmentos de Shamir.</p>
+        <div class="table-wrap">
+          <table class="summary">
+            <thead><tr><th>seq</th><th>tipo</th><th>token</th><th>conteúdo</th><th>hash</th></tr></thead>
+            <tbody id="g-bulletin"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="card">
+        <h2>Volume por operador e mês (Conselho)</h2>
+        <p class="muted small">O que o Conselho de Governança consegue verificar retroativamente sobre cada policial.</p>
+        <div class="table-wrap">
+          <table class="summary">
+            <thead><tr><th>operador</th><th>mês</th><th>tokens</th><th>registros liberados</th><th>decifragens conferidas</th></tr></thead>
+            <tbody id="g-operators"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </section>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js"></script>
   <script src="/static/charts.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/attacks.js"></script>
   <script src="/static/dados.js"></script>
+  <script src="/static/auditoria.js"></script>
 </body>
 </html>

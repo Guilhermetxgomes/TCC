@@ -1,11 +1,38 @@
+"""
+The Comitê de Emergência of the Busca Total, built only from library primitives:
+
+- each month has an X25519 key pair (RF04): the public key goes to the cameras, which
+  wrap their session keys to it with HPKE (crypto/escrow.py, `cryptography` package);
+- the private key SK_m is sealed with AES-128-GCM under a random 128-bit key-encryption
+  key (KEK), and the KEK is split with Shamir's secret sharing (PyCryptodome,
+  Crypto.Protocol.SecretSharing.Shamir) among the n members, any t of which recover it.
+  SK_m and the KEK are then discarded; only the sealed blob (public) and the shares remain.
+
+Opening a Busca Total: t members each release their share -- after checking the judge's
+token and the bulletin receipt (services/governance.py) -- the KEK is combined, SK_m is
+unsealed, the wraps in scope are opened and SK_m is discarded again.
+
+Trade-off of this design (it is the reconstruction described in the specification, not
+threshold decryption): whoever holds the reconstructed SK_m could open every camera and
+every day of the month. Restricting an activation to some cameras and days is therefore
+procedural (this code only opens the wraps in scope and drops the key), not
+cryptographic; the monthly key still confines the damage to one month (RNF04). A wrong
+share is detected (the AES-GCM tag of the sealed key fails) but not attributed to a member.
+"""
+import os
 import time
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
+from Crypto.Protocol.SecretSharing import Shamir
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from crypto import p256, threshold
-from crypto.escrow import unwrap_session_key, wrap_context
+from crypto.escrow import unwrap_session_key
+from crypto.tokens import verify_token
+from entities.auth_token import AuthToken
 from entities.session_key_wrap import SessionKeyWrap
 
 
@@ -18,12 +45,17 @@ class Scope:
     """
     What one activation of the Busca Total is allowed to open: one period (month) and,
     optionally, only some sessions (days) and/or some cameras of it. Members refuse to
-    produce a partial decryption for any wrap outside the scope they approved.
+    release their share for a request whose scope exceeds the judge's token.
     """
     period: str
     sessions: Optional[frozenset] = None    # None = every session of the period
     camera_ids: Optional[frozenset] = None  # None = every camera
     reason: str = ""
+    # The judge's Busca Total token and the receipt of the activation in the public bulletin
+    # (services/bulletin.py). Required only by a committee created with a judge key and a
+    # bulletin; the prototype's tests without governance leave them empty.
+    token: Optional[AuthToken] = field(default=None, compare=False)
+    receipt: Optional[dict] = field(default=None, compare=False)
 
     def covers(self, wrap: SessionKeyWrap) -> bool:
         return (
@@ -34,110 +66,131 @@ class Scope:
 
 
 class CommitteeMember:
-    """One representative (e.g. a state deputy). Holds one key share per period."""
+    """One representative (e.g. a state deputy). Holds one Shamir share per period."""
 
-    def __init__(self, index: int):
+    def __init__(self, index: int, policy: Optional[Callable[[Scope], None]] = None):
         self.index = index
-        self._shares: dict[str, threshold.KeyShare] = {}
+        self._shares: dict[str, bytes] = {}
+        self._policy = policy  # raises PermissionError when the member must refuse
 
-    def receive_share(self, period: str, share: threshold.KeyShare) -> None:
+    def receive_share(self, period: str, share: bytes) -> None:
         self._shares[period] = share
 
-    def partial_decrypt(self, wrap: SessionKeyWrap, scope: Scope) -> threshold.PartialDecryption:
-        if not scope.covers(wrap):
-            raise PermissionError(f"wrap of camera {wrap.camera_id} / {wrap.session} is outside the approved scope")
-        return threshold.partial_decrypt(self._shares[wrap.period], p256.decode(wrap.r))
+    def release_share(self, scope: Scope) -> tuple[int, bytes]:
+        """The member's share of the period's KEK, if the request passes its checks."""
+        if self._policy is not None:
+            self._policy(scope)
+        return self.index, self._shares[scope.period]
 
-    def prove(self, wrap: SessionKeyWrap, partial: threshold.PartialDecryption) -> threshold.ShareProof:
-        return threshold.prove_partial(self._shares[wrap.period], p256.decode(wrap.r), partial)
+
+@dataclass(frozen=True)
+class SealedPeriodKey:
+    """SK_m encrypted with AES-128-GCM under the KEK; public, kept with the committee."""
+    period: str
+    nonce: bytes
+    sealed: bytes
+
+
+def _sealing_ad(period: str) -> bytes:
+    return f"period-key|{period}".encode()
 
 
 class EmergencyCommittee:
     """
-    The Emergency Committee of the Busca Total: n members, any t of which can open the
-    session keys the cameras escrowed (crypto/escrow.py) -- by threshold decryption, so
-    the period's secret key is never rebuilt and each activation opens only the wraps
-    in its scope. Every activation is recorded in `activations`.
+    n members, any t of which can recover the month's private key and open the session keys
+    the cameras escrowed (crypto/escrow.py). Every activation is recorded in `activations`.
 
-    In this prototype all members live in one process and the period keys come from a
-    trusted dealer whose secret is discarded at once; in a deployment each member runs
-    on its own device and the keys come from a distributed key generation.
+    In this prototype the key of each month is generated by a dealer that discards SK_m and
+    the KEK right after splitting (Fase 0); the libraries used offer no distributed key
+    generation.
     """
 
-    def __init__(self, threshold_t: int = 4, n_members: int = 8):
+    def __init__(self, threshold_t: int = 4, n_members: int = 8, judge_public_key: Optional[bytes] = None,
+                 bulletin=None):
+        if not 1 <= threshold_t <= n_members <= 255:
+            raise ValueError("need 1 <= t <= n <= 255 (PyCryptodome Shamir uses one-byte indexes)")
         self.threshold = threshold_t
-        self.members = {index: CommitteeMember(index) for index in range(1, n_members + 1)}
-        self._public_keys: dict[str, threshold.PublicKey] = {}
+        # With a judge key and a bulletin, every member refuses to release its share unless the
+        # request carries a valid Busca Total token matching its scope AND the activation was
+        # already published in the bulletin ("publish before decrypt", RNF08).
+        self.judge_public_key = judge_public_key
+        self.bulletin = bulletin
+        policy = self._authorize if judge_public_key is not None and bulletin is not None else None
+        self.members = {index: CommitteeMember(index, policy) for index in range(1, n_members + 1)}
+        self._public_keys: dict[str, X25519PublicKey] = {}
+        self._sealed: dict[str, SealedPeriodKey] = {}
         self.activations: list[dict] = []
 
-    def public_key(self, period: str) -> threshold.PublicKey:
-        """Public key of a period (month); cameras encrypt their session keys to it."""
+    def _authorize(self, scope: Scope) -> None:
+        token = scope.token
+        if token is None or not verify_token(token, self.judge_public_key):
+            raise PermissionError("pedido sem token do Autorizador Legal válido")
+        if token.mode != "total":
+            raise PermissionError(f"token de Busca {token.mode.capitalize()} não autoriza a Busca Total")
+        allowed = token.scope
+        if scope.period != allowed["period"]:
+            raise PermissionError(f"período {scope.period} fora do token ({allowed['period']})")
+        for name, asked in (("sessions", scope.sessions), ("camera_ids", scope.camera_ids)):
+            if allowed[name] is not None and (asked is None or not set(asked) <= set(allowed[name])):
+                raise PermissionError(f"escopo pedido ({name}) maior do que o autorizado no token")
+        if not self.bulletin.contains(scope.receipt, token.token_id):
+            raise PermissionError("ativação não publicada no boletim público: os membros não participam")
+
+    def check_request(self, scope: Scope) -> None:
+        """
+        What each member checks before taking part, run once up front so that a request the
+        members would refuse does not even get the wraps released (PermissionError).
+        """
+        if self.judge_public_key is not None and self.bulletin is not None:
+            self._authorize(scope)
+
+    def public_key(self, period: str) -> X25519PublicKey:
+        """Public key of a period (month); cameras wrap their session keys to it (Fase 0 on first use)."""
         if period not in self._public_keys:
-            public, shares = threshold.deal(self.threshold, len(self.members))
-            for share in shares:
-                self.members[share.index].receive_share(period, share)
-            self._public_keys[period] = public
+            private_key = X25519PrivateKey.generate()
+            raw = private_key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+                                            serialization.NoEncryption())
+            kek, nonce = os.urandom(16), os.urandom(12)
+            self._sealed[period] = SealedPeriodKey(period, nonce, AESGCM(kek).encrypt(nonce, raw, _sealing_ad(period)))
+            for index, share in Shamir.split(self.threshold, len(self.members), kek):
+                self.members[index].receive_share(period, share)
+            self._public_keys[period] = private_key.public_key()
+            del private_key, raw, kek  # only the public key, the sealed blob and the shares remain
         return self._public_keys[period]
 
-    def open_session_keys(self, scope: Scope, wraps: list[SessionKeyWrap], member_indexes: list[int],
-                          verify_proofs: bool = False) -> dict:
-        """
-        Threshold-decrypts every wrap in `scope` with the given members and returns
-        {(camera_id, session): session_key}.
+    def _recover(self, period: str, shares: list[tuple[int, bytes]]) -> X25519PrivateKey:
+        sealed = self._sealed[period]
+        kek = Shamir.combine(shares)
+        try:
+            raw = AESGCM(kek).decrypt(sealed.nonce, sealed.sealed, _sealing_ad(period))
+        except InvalidTag:
+            raise ValueError("the shares do not recover the period key: at least one member released a wrong "
+                             "share (Shamir alone cannot say which)") from None
+        return X25519PrivateKey.from_private_bytes(raw)
 
-        The members' answers are checked optimistically: a wrong partial makes the AES-GCM
-        tag of the wrap fail, and only then are the Chaum-Pedersen proofs requested to
-        find out who misbehaved (verify_proofs=True checks every partial up front).
+    def open_session_keys(self, scope: Scope, wraps: list, member_indexes: list[int]) -> dict:
+        """
+        Recovers SK_m with the shares of the given members, opens every wrap in `scope` and
+        drops SK_m; returns {(camera_id, session): session_key}.
         """
         present = sorted(set(member_indexes))
         if len(present) < self.threshold:
             raise QuorumError(f"quorum not reached: {len(present)} of the {self.threshold} members required")
-        public = self.public_key(scope.period)
+        self.public_key(scope.period)
         started = time.perf_counter()
-        session_keys = {}
-        partial_decryptions = 0
-        for wrap in wraps:
-            if not scope.covers(wrap):
-                continue
-            r_point = p256.decode(wrap.r)
-            partials = [self.members[index].partial_decrypt(wrap, scope) for index in present[: self.threshold]]
-            partial_decryptions += len(partials)
-            if verify_proofs:
-                self._check_proofs(public, wrap, r_point, partials)
-            kem_key = threshold.combine(public, r_point, partials, wrap_context(wrap.camera_id, wrap.period, wrap.session))
-            try:
-                session_keys[(wrap.camera_id, wrap.session)] = unwrap_session_key(wrap, kem_key)
-            except InvalidTag:
-                self._check_proofs(public, wrap, r_point, partials)
-                raise
+        shares = [self.members[index].release_share(scope) for index in present[: self.threshold]]
+        private_key = self._recover(scope.period, shares)
+        session_keys = {
+            (wrap.camera_id, wrap.session): unwrap_session_key(wrap, private_key)
+            for wrap in wraps if scope.covers(wrap)
+        }
+        del private_key  # procedural: the key is used for this scope only, then dropped
         self.activations.append({
             "at": time.time(), "period": scope.period, "reason": scope.reason, "members": present[: self.threshold],
+            "token_id": scope.token.token_id if scope.token else None,
             "sessions": sorted({session for _, session in session_keys}),
             "cameras": sorted({camera for camera, _ in session_keys}),
-            "wraps_opened": len(session_keys), "partial_decryptions": partial_decryptions,
+            "wraps_opened": len(session_keys), "shares_released": len(shares),
             "seconds": time.perf_counter() - started,
         })
         return session_keys
-
-    def _check_proofs(self, public, wrap, r_point, partials) -> None:
-        cheaters = [
-            partial.index for partial in partials
-            if not threshold.verify_partial(public, r_point, partial, self.members[partial.index].prove(wrap, partial))
-        ]
-        if cheaters:
-            raise ValueError(f"invalid partial decryption from member(s) {cheaters}")
-
-    # -- baseline, for comparison only --------------------------------------------------
-
-    def reconstruct_period_secret(self, period: str, member_indexes: list[int]) -> int:
-        """
-        Plain Shamir reconstruction of the period's secret key (the alternative the
-        system does NOT use): whoever receives the result can open every wrap of the
-        period, of every camera, without the committee ever being asked again.
-        """
-        present = sorted(set(member_indexes))
-        if len(present) < self.threshold:
-            raise QuorumError(f"quorum not reached: {len(present)} of the {self.threshold} members required")
-        self.public_key(period)
-        shares = [self.members[index]._shares[period] for index in present[: self.threshold]]
-        return threshold.reconstruct_secret(shares)

@@ -241,6 +241,7 @@ function loadSimulation(sim) {
   $("play").disabled = false;
   $("search").disabled = false;
   if (window.onSimulationLoaded) window.onSimulationLoaded(sim);
+  document.dispatchEvent(new CustomEvent("simulation-loaded", { detail: sim }));
   $("p-crime").max = sim.params.ticks;
   $("sim-info").textContent =
     `${sim.params.records} registros no banco · crime na câmera ${sim.crime.node} às ${clockText(sim.crime.tick)} ` +
@@ -323,7 +324,7 @@ const MODE_NOTES = {
   fechada: "Placa conhecida: resolve os puzzles do crime e, câmera a câmera, os dos vizinhos mais prováveis até achar o carro.",
   aberta: "Placa desconhecida: decifra TODOS os registros da janela do crime, filtra pelas letras lembradas e segue cada suspeito.",
   bolo: "As câmeras alertam em claro (sem puzzle), mas só para avistamentos depois do aviso: o passado não é coberto.",
-  total: "Acesso excepcional: um quórum do Comitê de Emergência decifra por limiar as chaves de sessão das câmeras e TODOS os registros do dia abrem sem puzzle.",
+  total: "Acesso excepcional: um quórum do Comitê de Emergência reúne seus fragmentos de Shamir, recupera a chave do mês (X25519), abre as chaves de sessão das câmeras e TODOS os registros do dia abrem sem puzzle.",
 };
 
 function updateModeUi() {
@@ -334,12 +335,14 @@ function updateModeUi() {
   $("l-members").hidden = mode !== "total";
   $("l-hops").hidden = mode === "bolo" || mode === "total";
   $("l-until").hidden = mode === "bolo" || mode === "total";
+  $("l-budget").hidden = mode === "bolo" || mode === "total";
   $("s-hops").disabled = $("s-until").checked;
 }
 
 const STOP_REASONS = {
   max_hops: "limite de câmeras atingido (o carro continua)",
   lost: "sem novos registros: fim da gravação ou rastro perdido",
+  denied: "o Servidor recusou a janela seguinte (token vencido ou orçamento esgotado)",
 };
 
 function resetSearchStyles() {
@@ -363,6 +366,15 @@ function renderStats(result, partial) {
   if (t.rejected) rows.push(...statRow("registros rejeitados (assinatura inválida)", String(t.rejected), "bad"));
   if (!partial) {
     const e = result.estimate;
+    const g = result.governance;
+    if (g) {
+      rows.push(el("div", { class: "sep" }));
+      rows.push(...statRow("tokens do juiz", g.tokens.map((tk) => `${tk.token_id}`).join(", ") || "nenhum"));
+      rows.push(...statRow("entradas no log do Servidor", String(g.log_entries)));
+      rows.push(...statRow("decifragens declaradas ao Auditor", String(g.declarations)));
+      if (g.denials.length) rows.push(...statRow("pedidos recusados pelo Servidor", String(g.denials.length), "bad"));
+      rows.push(...statRow("custo da governança (token + log)", fmtDuration(g.overhead_seconds)));
+    }
     rows.push(el("div", { class: "sep" }));
     if (result.mode === "bolo") {
       rows.push(...statRow("custo de puzzle", "nenhum"));
@@ -372,7 +384,7 @@ function renderStats(result, partial) {
       rows.push(...statRow("custo de puzzle", "nenhum (chave de sessão via quórum)"));
       rows.push(...statRow("deputados que participaram", `${x.members.join(", ")} (limiar ${x.threshold} de ${x.committee_members})`));
       rows.push(...statRow("chaves de sessão abertas", `${x.wraps_opened} (sessão ${x.session})`));
-      rows.push(...statRow("decifragens parciais", String(x.partial_decryptions)));
+      rows.push(...statRow("fragmentos de Shamir entregues", String(x.shares_released)));
       rows.push(...statRow("tempo do comitê", fmtDuration(x.committee_seconds)));
       rows.push(...statRow("outras placas expostas", String(x.other_plates_exposed), "bad"));
       rows.push(...statRow("avistamentos antes do crime", String(x.sightings_before_crime)));
@@ -424,6 +436,7 @@ function stepLabel(step) {
 }
 
 function baseStepLabel(step) {
+  if (step.kind === "denied") return `recusado · câmera ${step.node} · ${step.reason}`;
   if (step.kind === "alert") return `alerta · câmera ${step.node} · ${clockText(step.tick)}`;
   if (step.kind === "quorum") {
     return `quórum · deputados ${step.members.join(", ")} · ${step.wraps_opened} chaves de sessão`;
@@ -454,7 +467,7 @@ async function runSearch() {
     const result = await api("/api/search", {
       run_id: state.sim.run_id, mode: $("s-mode").value, hint_len: +$("s-hint").value,
       bolo_delay_ticks: +$("s-delay").value, max_hops: +$("s-hops").value, until_lost: $("s-until").checked,
-      realistic_n: +$("s-realistic").value, members: +$("s-members").value,
+      realistic_n: +$("s-realistic").value, members: +$("s-members").value, budget_records: +$("s-budget").value,
     });
     if (token !== state.searchToken) return;
     await animateSearch(result, token);
@@ -476,14 +489,14 @@ async function animateSearch(result, token) {
     if (token !== state.searchToken) return;
     if (active) active.classList.remove("active");
 
-    running.probes += step.kind === "alert" || step.kind === "quorum" ? 0 : 1;
+    running.probes += step.kind === "alert" || step.kind === "quorum" || step.kind === "denied" ? 0 : 1;
     running.records_tested += step.records_tested;
     running.attempts += step.attempts;
     running.real_seconds += step.real_seconds;
     running.rejected += step.rejected || 0;
 
     // right-hand column: records decrypted so far, to watch the cost grow camera by camera
-    const item = el("li", { class: (step.found ? "found active" : "active") + (step.rejected ? " rejected" : ""),
+    const item = el("li", { class: (step.found ? "found active" : "active") + (step.rejected ? " rejected" : "") + (step.kind === "denied" ? " denied" : ""),
         title: step.rejected ? `registro(s) ${step.rejected_ids.join(", ")} rejeitado(s): assinatura inválida` : false },
       el("span", { text: stepLabel(step) }),
       el("span", { class: "mono", text: `Σ ${running.records_tested}`, title: "registros decifrados até aqui" }),
@@ -607,7 +620,7 @@ async function showVertex(nodeId, offset) {
 
 // ---------- views (tabs) ----------
 
-const VIEWS = ["busca", "ataques", "dados"];
+const VIEWS = ["busca", "ataques", "dados", "auditoria"];
 const viewHooks = {}; // view name -> function called when the view is shown
 
 function showView(name) {

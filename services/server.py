@@ -1,4 +1,5 @@
 import base64
+import json
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -28,9 +29,22 @@ ENSURE_SCHEMA_SQL = """
     );
     CREATE INDEX IF NOT EXISTS idx_session_key_wraps_run_period_session
         ON session_key_wraps (run_id, period, session, camera_id);
+    ALTER TABLE session_key_wraps DROP COLUMN IF EXISTS r;
+    ALTER TABLE session_key_wraps DROP COLUMN IF EXISTS nonce;
 
     ALTER TABLE open_search_records ADD COLUMN IF NOT EXISTS signature TEXT;
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+        log_id SERIAL PRIMARY KEY, run_id TEXT, seq INTEGER NOT NULL, at TEXT NOT NULL, kind TEXT NOT NULL,
+        token_id TEXT, mode TEXT, operator_id TEXT, camera_id INTEGER, window_start TEXT, window_end TEXT,
+        records INTEGER NOT NULL DEFAULT 0, detail TEXT NOT NULL, prev_hash TEXT NOT NULL, hash TEXT NOT NULL,
+        signature TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_log_run_seq ON audit_log (run_id, seq);
 """
+
+AUDIT_COLUMNS = ("seq", "at", "kind", "token_id", "mode", "operator_id", "camera_id", "window_start", "window_end",
+                 "records", "detail", "prev_hash", "hash", "signature")
 
 # Columns that rebuild a Record, in the order _row_to_record expects.
 RECORD_COLUMNS = "camera_id, c_prime, n, nonce, ciphertext, block, captured_at, signature"
@@ -186,13 +200,13 @@ class Server:
         if not wraps:
             return
         rows = [
-            (run_id, w.camera_id, w.period, w.session, _b64(w.r), _b64(w.nonce), _b64(w.wrapped))
+            (run_id, w.camera_id, w.period, w.session, _b64(w.wrapped))
             for w in wraps
         ]
         cursor = self.conn.cursor()
         execute_values(
             cursor,
-            "INSERT INTO session_key_wraps (run_id, camera_id, period, session, r, nonce, wrapped) VALUES %s",
+            "INSERT INTO session_key_wraps (run_id, camera_id, period, session, wrapped) VALUES %s",
             rows,
         )
         self.conn.commit()
@@ -203,7 +217,7 @@ class Server:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT camera_id, period, session, r, nonce, wrapped FROM session_key_wraps
+            SELECT camera_id, period, session, wrapped FROM session_key_wraps
             WHERE run_id = %s AND period = %s AND (%s IS NULL OR session = %s)
             ORDER BY session ASC, camera_id ASC
             """,
@@ -212,11 +226,9 @@ class Server:
         rows = cursor.fetchall()
         cursor.close()
         return [
-            SessionKeyWrap(
-                camera_id=camera, period=wrap_period, session=wrap_session, r=base64.b64decode(r),
-                nonce=base64.b64decode(nonce), wrapped=base64.b64decode(wrapped),
-            )
-            for camera, wrap_period, wrap_session, r, nonce, wrapped in rows
+            SessionKeyWrap(camera_id=camera, period=wrap_period, session=wrap_session,
+                           wrapped=base64.b64decode(wrapped))
+            for camera, wrap_period, wrap_session, wrapped in rows
         ]
 
     def get_rows_for_camera(self, run_id: str, camera_id: int, limit: int = 100, offset: int = 0) -> dict:
@@ -329,11 +341,52 @@ class Server:
         self.conn.commit()
         cursor.close()
 
+    # -- audit log (services/audit_log.py) ----------------------------------------------
+
+    def append_audit(self, run_id: str, entry: dict):
+        values = [json.dumps(entry["detail"]) if column == "detail" else entry.get(column) for column in AUDIT_COLUMNS]
+        cursor = self.conn.cursor()
+        cursor.execute(
+            f"INSERT INTO audit_log (run_id, {', '.join(AUDIT_COLUMNS)}) VALUES (%s{', %s' * len(AUDIT_COLUMNS)})",
+            (run_id, *values),
+        )
+        self.conn.commit()
+        cursor.close()
+
+    def _audit_rows(self, run_id: str, last_only: bool = False) -> list[dict]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            f"SELECT {', '.join(AUDIT_COLUMNS)} FROM audit_log WHERE run_id = %s "
+            + ("ORDER BY seq DESC, log_id DESC LIMIT 1" if last_only else "ORDER BY seq ASC, log_id ASC"),
+            (run_id,),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        entries = [dict(zip(AUDIT_COLUMNS, row)) for row in rows]
+        for entry in entries:
+            entry["detail"] = json.loads(entry["detail"])
+        return entries
+
+    def get_audit_log(self, run_id: str) -> list[dict]:
+        return self._audit_rows(run_id)
+
+    def get_audit_head(self, run_id: str) -> Optional[dict]:
+        rows = self._audit_rows(run_id, last_only=True)
+        return rows[0] if rows else None
+
+    def delete_audit(self, run_id: str, seqs: list[int]):
+        """Only the tampering demo calls this (a dishonest operator erasing his tracks)."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM audit_log WHERE run_id = %s AND seq = ANY(%s)", (run_id, list(seqs)))
+        self.conn.commit()
+        cursor.close()
+
     def clear_run(self, run_id: str):
         cursor = self.conn.cursor()
         cursor.execute("DELETE FROM open_search_records WHERE run_id = %s", (run_id,))
         cursor.execute("DELETE FROM block_headers WHERE run_id = %s", (run_id,))
         cursor.execute("DELETE FROM session_key_wraps WHERE run_id = %s", (run_id,))
+        cursor.execute("DELETE FROM audit_log WHERE run_id = %s", (run_id,))
         self.conn.commit()
         cursor.close()
 
@@ -343,6 +396,7 @@ class Server:
         cursor.execute("DELETE FROM open_search_records WHERE run_id IS NOT NULL")
         cursor.execute("DELETE FROM block_headers WHERE run_id IS NOT NULL")
         cursor.execute("DELETE FROM session_key_wraps WHERE run_id IS NOT NULL")
+        cursor.execute("DELETE FROM audit_log WHERE run_id IS NOT NULL")
         self.conn.commit()
         cursor.close()
 

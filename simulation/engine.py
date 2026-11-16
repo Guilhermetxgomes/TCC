@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Optional
 from crypto.escrow import CameraEscrow
 from services.camera import Camera
 from services.committee import EmergencyCommittee
+from services.governance import Governance
 from simulation.city_graph import CityGraph
 
 if TYPE_CHECKING:  # only a type hint: lets the simulation run on simulation.memory_server too
@@ -17,6 +18,7 @@ TICK_SECONDS = 10
 SPEED_MPS = 30 / 3.6  # nominal 30 km/h inside the campus
 SIM_START = datetime(2026, 1, 1, 8, 0, 0, tzinfo=timezone.utc)
 MIN_STEPS_AFTER_CRIME = 6  # the escape must be long enough to be worth tracing
+INVESTIGATION_DELAY_TICKS = 360  # the investigation runs one hour after the end of the recording
 
 
 class SimClock:
@@ -65,6 +67,13 @@ class World:
     # for the records' signatures, so it lives here and NOT in the Servidor's database, which
     # the tampering demo lets a dishonest operator rewrite.
     camera_keys: dict[int, bytes] = field(default_factory=dict)
+    # Judge, public bulletin, log checkpoints and declarations (services/governance.py), also
+    # kept outside the database. None: searches read the Servidor directly, as before.
+    governance: Optional[Governance] = None
+
+    def investigation_time(self) -> str:
+        """Simulated instant at which the searches (and their tokens) happen."""
+        return self.clock.iso(self.params["ticks"] + INVESTIGATION_DELAY_TICKS)
 
     def vehicle(self, vehicle_id: int) -> Vehicle:
         return self.vehicles[vehicle_id]
@@ -181,7 +190,9 @@ def run_simulation(graph: CityGraph, server: "Server", run_id: str, n_vehicles: 
     clock = SimClock()
     vehicles = simulate_traffic(graph, n_vehicles, ticks, rng)
     crime = pick_crime(vehicles, crime_tick, rng)
-    committee = EmergencyCommittee(committee_threshold, committee_members) if escrow else None
+    governance = Governance()
+    committee = (EmergencyCommittee(committee_threshold, committee_members, governance.judge.public_key,
+                                    governance.bulletin) if escrow else None)
     camera_keys: dict[int, bytes] = {}
     records = populate_database(vehicles, server, run_id, puzzle_level, clock, block_level, block_granularity,
                                 committee, session_granularity, camera_keys)
@@ -193,4 +204,4 @@ def run_simulation(graph: CityGraph, server: "Server", run_id: str, n_vehicles: 
         "committee_threshold": committee_threshold, "committee_members": committee_members,
     }
     return World(run_id=run_id, params=params, vehicles=vehicles, crime=crime, clock=clock, committee=committee,
-                 camera_keys=camera_keys)
+                 camera_keys=camera_keys, governance=governance)

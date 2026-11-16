@@ -16,7 +16,9 @@ from crypto.block_crumpling import solve_block
 from crypto.puzzle import solve_puzzle
 from crypto.signing import verify_record
 from entities.record import Record
+from services.auditor import Auditor, entry_view
 from services.committee import QuorumError
+from services.judge import DEFAULT_BUDGET_RECORDS
 from services.server import Server
 from simulation import investigation
 from simulation.city_graph import CityGraph
@@ -24,6 +26,7 @@ from simulation.engine import World, run_simulation
 from simulation.investigation import Investigator
 from simulation import attacks, real_search, tolls
 from simulation.attacks import ConventionalServer
+from simulation import governance_attacks
 from simulation.tampering import forge_attack, move_attack
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -34,6 +37,7 @@ graph = CityGraph.load()
 runs: dict[str, World] = {}
 tampered: dict[str, dict[int, Record]] = {}  # run_id -> record_id -> original record (to restore)
 conventional: dict[str, ConventionalServer] = {}  # run_id -> the same captures in a conventional backend
+governance_undo: dict[str, list] = {}  # run_id -> what the governance attacks changed (to restore)
 lock = threading.Lock()  # the simulation is a single-user tool; serialise heavy calls
 
 
@@ -100,6 +104,7 @@ def api_simulate():
                 old = runs.pop(next(iter(runs))).run_id
                 tampered.pop(old, None)
                 conventional.pop(old, None)
+                governance_undo.pop(old, None)
                 server.clear_run(old)
             try:
                 world = run_simulation(graph, server, run_id, n_vehicles, ticks, puzzle_level, crime_tick, seed,
@@ -127,11 +132,12 @@ def api_search():
     max_hops = None if body.get("until_lost") else _int(body, "max_hops", investigation.DEFAULT_MAX_HOPS, 1, 20)
     realistic_n = _int(body, "realistic_n", investigation.DEFAULT_REALISTIC_N, 2, 10**12)
     realistic_t = realistic_n  # with block crumpling the same realistic N applies to the block puzzle
+    budget = _int(body, "budget_records", DEFAULT_BUDGET_RECORDS, 1, 100_000)  # Busca Fechada token budget
 
     with lock:
         server = Server()
         try:
-            investigator = Investigator(graph, server, world)
+            investigator = Investigator(graph, server, world, budget_records=budget)
             if mode == "fechada":
                 result = investigator.busca_fechada(window, max_hops, realistic_n, realistic_t)
             elif mode == "aberta":
@@ -406,6 +412,76 @@ def api_attack():
         return jsonify({"attack": attack, "conventional": left, "nemesis": right, "tamper": nemesis})
 
     return jsonify({"error": f"unknown attack {attack!r}"}), 400
+
+
+# ---------- governance: tokens, log, bulletin, reconciliation ----------
+
+
+@app.get("/api/audit")
+def api_audit():
+    """Everything the Auditor and the Conselho see for the current run (view 4)."""
+    world = _world(request.args.get("run_id", ""))
+    gov = world.governance
+    with lock:
+        server = Server()
+        try:
+            report = Auditor.for_world(world).reconcile(world, server)
+            log = server.get_audit_log(world.run_id)
+        finally:
+            server.close()
+    broken = set(report["chain"]["broken_seqs"])
+    bulletin_broken = set(report["bulletin_chain"]["broken_seqs"])
+    return jsonify({
+        "run_id": world.run_id,
+        "now": world.investigation_time(),
+        "keys": {"judge": gov.judge.public_key.hex(), "server_log": gov.server_log_public_key.hex()},
+        "tokens": report["tokens"],
+        "log": [entry_view(entry, broken) for entry in log],
+        "checkpoints": gov.checkpoints,
+        "bulletin": [{**entry, "broken": entry["seq"] in bulletin_broken} for entry in gov.bulletin.entries()],
+        "reconciliation": {key: report[key] for key in ("ok", "discrepancies", "by_operator", "totals")},
+        "chain": {key: report["chain"][key] for key in ("ok", "length", "head", "problems")},
+        "bulletin_chain": {key: report["bulletin_chain"][key] for key in ("ok", "length", "head", "problems")},
+        "pending_restore": len(governance_undo.get(world.run_id, [])),
+    })
+
+
+@app.post("/api/audit/attack")
+def api_audit_attack():
+    body = request.get_json(silent=True) or {}
+    world = _world(str(body.get("run_id", "")))
+    attack = str(body.get("attack", ""))
+    params = {
+        "budget_records": _int(body, "budget_records", 3, 1, 1000),
+        "realistic_n": _int(body, "realistic_n", investigation.DEFAULT_REALISTIC_N, 2, 10**12),
+    }
+    with lock:
+        server = Server()
+        try:
+            result = governance_attacks.run(attack, graph, server, world, **params)
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        finally:
+            server.close()
+    if result.get("undo"):
+        governance_undo.setdefault(world.run_id, []).append(result["undo"])
+    result.pop("undo", None)
+    result["pending_restore"] = len(governance_undo.get(world.run_id, []))
+    return jsonify(result)
+
+
+@app.post("/api/audit/restore")
+def api_audit_restore():
+    body = request.get_json(silent=True) or {}
+    world = _world(str(body.get("run_id", "")))
+    undo = governance_undo.pop(world.run_id, [])
+    with lock:
+        server = Server()
+        try:
+            restored = governance_attacks.restore(server, world, undo)
+        finally:
+            server.close()
+    return jsonify({"restored": restored})
 
 
 # ---------- real traffic (ARTESP toll plazas) ----------

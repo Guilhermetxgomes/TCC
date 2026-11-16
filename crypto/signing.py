@@ -28,6 +28,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from crypto.canonical import encode
 from entities.record import Record
 
 SIGNATURE_CONTEXT = b"nemesis-record-v1"
@@ -36,10 +37,6 @@ SIGNATURE_CONTEXT = b"nemesis-record-v1"
 def record_ad(camera_id: int, captured_at: str) -> bytes:
     """Associated data of a record's AES-GCM encryption: the camera and the capture instant."""
     return f"record|{camera_id}|{captured_at}".encode()
-
-
-def _field(data: bytes) -> bytes:
-    return len(data).to_bytes(4, "big") + data  # length prefix: no two field lists encode alike
 
 
 def signed_payload(record: Record) -> bytes:
@@ -54,7 +51,7 @@ def signed_payload(record: Record) -> bytes:
         record.nonce,
         record.ciphertext,
     ]
-    return b"".join(_field(f) for f in fields)
+    return encode(*fields)
 
 
 class CameraSigner:
