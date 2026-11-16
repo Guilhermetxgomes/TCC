@@ -7,7 +7,7 @@ class AuthToken:
     """
     Authorization token issued and signed (ECDSA P-256) by the Autorizador Legal (the
     judge). The Servidor checks it before releasing any encrypted row (services/custody.py),
-    and the Comitê de Emergência checks it before any partial decryption.
+    and each Comitê de Emergência member checks it before releasing its Shamir share.
 
     `scope` depends on `mode`:
       - "aberta":  {"camera_id", "start", "end"}   -- one camera, one time window

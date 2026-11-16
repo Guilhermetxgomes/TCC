@@ -270,7 +270,7 @@ def total_unpublished(graph, server, world, **_) -> dict:
     head_after = server.get_audit_head(world.run_id)
     released = (head_after or {}).get("seq") != (head_before or {}).get("seq")
     checks = [
-        _check("Membros do Comitê", refused, f"recusaram a decifragem parcial: {reason}" if refused else reason),
+        _check("Membros do Comitê", refused, f"recusaram entregar seus fragmentos de Shamir: {reason}" if refused else reason),
         _check("Servidor", not released, "nenhum encapsulamento nem registro foi liberado" if not released
                else "encapsulamentos liberados"),
     ]

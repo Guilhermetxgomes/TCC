@@ -5,15 +5,14 @@ Checks of the cryptographic core (no database, no pytest needed):
 
 The functions are also collected by pytest, if it is installed.
 """
-import secrets
+from dataclasses import replace
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.asymmetric import ec
 
-from crypto import p256, threshold
 from crypto.block_crumpling import solve_block
 from crypto.crumpling import generate_k
-from crypto.escrow import BLOCK_LABEL, RECORD_LABEL, CameraEscrow, derive_secret, open_with_session_key
+from crypto.escrow import (BLOCK_LABEL, RECORD_LABEL, CameraEscrow, derive_secret, open_with_session_key,
+                           unwrap_session_key)
 from crypto.puzzle import open_record, solve_puzzle
 from crypto.signing import verify_record
 from simulation.tampering import forge_attack, move_attack
@@ -24,60 +23,49 @@ DAY1 = "2026-01-01T08:00:00+00:00"
 DAY2 = "2026-01-02T08:00:00+00:00"
 
 
-def test_p256_matches_openssl():
-    assert p256.is_on_curve(p256.G)
-    assert p256.multiply(p256.ORDER, p256.G) is None
-    assert p256.add(p256.multiply(p256.ORDER - 1, p256.G), p256.G) is None
-    for _ in range(10):
-        d, e = (secrets.randbelow(p256.ORDER - 1) + 1 for _ in range(2))
-        mine, peer = ec.derive_private_key(d, ec.SECP256R1()), ec.derive_private_key(e, ec.SECP256R1())
-        public = mine.public_key().public_numbers()
-        assert p256.multiply(d, p256.G) == (public.x, public.y)  # d*G
-        peer_public = peer.public_key().public_numbers()
-        shared = mine.exchange(ec.ECDH(), peer.public_key())  # x-coordinate of d*(e*G)
-        assert p256.multiply(d, (peer_public.x, peer_public.y))[0] == int.from_bytes(shared, "big")
-        a, b = p256.multiply(d, p256.G), p256.multiply(e, p256.G)
-        assert p256.add(a, b) == p256.multiply(d + e, p256.G)
-        assert p256.add(a, a) == p256.multiply(2 * d, p256.G)
-        assert p256.decode(p256.encode(a)) == a
+def _escrowed_camera(committee, camera_id=7, puzzle_level=16):
+    return Camera(id=camera_id, location_id=camera_id, puzzle_level=puzzle_level,
+                  escrow=CameraEscrow(camera_id, committee.public_key))
 
 
-def test_threshold_any_quorum_opens_and_fewer_do_not():
-    public, shares = threshold.deal(3, 5)
-    r_point, key = threshold.encapsulate(public, b"ctx")
-    partials = [threshold.partial_decrypt(share, r_point) for share in shares]
-    for subset in ([0, 1, 2], [0, 2, 4], [1, 3, 4], [4, 2, 0]):
-        assert threshold.combine(public, r_point, [partials[i] for i in subset], b"ctx") == key
-    assert threshold.combine(public, r_point, partials[:3], b"other context") != key
+def test_any_quorum_of_shamir_shares_recovers_the_month_key():
+    committee = EmergencyCommittee(threshold_t=3, n_members=5)
+    camera = _escrowed_camera(committee)
+    record = camera.encrypt_plate("AAA0000", DAY1)
+    wraps = camera.drain_session_wraps()
+    for members in ([1, 2, 3], [1, 3, 5], [2, 4, 5], [5, 4, 3, 2]):
+        key = committee.open_session_keys(Scope(period="2026-01"), wraps, members)[(7, "2026-01-01")]
+        assert open_with_session_key(record, key) == "AAA0000"
     try:
-        threshold.combine(public, r_point, partials[:2], b"ctx")
-        raise AssertionError("two partials must not be enough for t = 3")
+        committee.open_session_keys(Scope(period="2026-01"), wraps, [1, 2])
+        raise AssertionError("two members must not be enough for t = 3")
+    except QuorumError:
+        pass
+    honest = committee.members[2]._shares["2026-01"]
+    committee.members[2].receive_share("2026-01", bytes(16))  # a member hands in a wrong share
+    try:
+        committee.open_session_keys(Scope(period="2026-01"), wraps, [1, 2, 3])
+        raise AssertionError("a wrong share must not recover the key")
     except ValueError:
         pass
-    # Interpolating with only two real shares (as if t were 2) gives an unrelated key.
-    weaker = threshold.PublicKey(public.point, 2, public.verification_points)
-    assert threshold.combine(weaker, r_point, partials[:2], b"ctx") != key
+    committee.members[2].receive_share("2026-01", honest)
 
 
-def test_threshold_proofs_catch_a_wrong_partial():
-    public, shares = threshold.deal(2, 3)
-    r_point, _ = threshold.encapsulate(public, b"ctx")
-    partial = threshold.partial_decrypt(shares[0], r_point)
-    proof = threshold.prove_partial(shares[0], r_point, partial)
-    assert threshold.verify_partial(public, r_point, partial, proof)
-    forged = threshold.PartialDecryption(partial.index, p256.multiply(7, r_point))
-    assert not threshold.verify_partial(public, r_point, forged, proof)
-    other_member = threshold.PartialDecryption(2, partial.point)
-    assert not threshold.verify_partial(public, r_point, other_member, proof)
-
-
-def test_shamir_reconstruction_gives_the_whole_key():
-    public, shares = threshold.deal(4, 8)
-    secret = threshold.reconstruct_secret([shares[i] for i in (7, 1, 4, 2)])
-    assert p256.multiply(secret, p256.G) == public.point
-    r_point, key = threshold.encapsulate(public, b"ctx")
-    assert threshold.decapsulate(secret, r_point, b"ctx") == key
-    assert p256.multiply(threshold.reconstruct_secret(shares[:3]), p256.G) != public.point
+def test_hpke_wrap_only_opens_as_its_own_camera_and_day():
+    committee = EmergencyCommittee(threshold_t=2, n_members=3)
+    camera = _escrowed_camera(committee)
+    camera.encrypt_plate("AAA0000", DAY1)
+    wrap = camera.drain_session_wraps()[0]
+    assert len(wrap.wrapped) == 32 + 32 + 16  # X25519 encapsulated key || session key || GCM tag
+    shares = [committee.members[i].release_share(Scope(period="2026-01")) for i in (1, 2)]
+    private_key = committee._recover("2026-01", shares)
+    assert len(unwrap_session_key(wrap, private_key)) == 32
+    for moved in (replace(wrap, camera_id=8), replace(wrap, session="2026-01-02")):
+        try:
+            unwrap_session_key(moved, private_key)
+            raise AssertionError("a wrap presented as another camera or day must not open")
+        except InvalidTag:
+            pass
 
 
 def test_generate_k_range():
@@ -120,40 +108,46 @@ def test_escrow_session_key_opens_only_its_session():
         pass
 
     log = committee.activations[-1]
-    assert log["members"] == [1, 3, 5] and log["wraps_opened"] == 1 and log["partial_decryptions"] == 3
+    assert log["members"] == [1, 3, 5] and log["wraps_opened"] == 1 and log["shares_released"] == 3
 
 
-def test_committee_refuses_without_quorum_or_outside_scope():
+def test_committee_refuses_without_quorum_and_opens_only_the_scope():
     committee = EmergencyCommittee(threshold_t=3, n_members=5)
-    camera = Camera(id=7, location_id=7, puzzle_level=16, escrow=CameraEscrow(7, committee.public_key))
+    camera = _escrowed_camera(committee)
     camera.encrypt_plate("AAA0000", DAY1)
     wraps = camera.drain_session_wraps()
-    scope = Scope(period="2026-01", camera_ids=frozenset({99}))
     try:
         committee.open_session_keys(Scope(period="2026-01"), wraps, [1, 2, 2])
         raise AssertionError("two distinct members are not a quorum of three")
     except QuorumError:
         pass
-    assert committee.open_session_keys(scope, wraps, [1, 2, 3]) == {}
-    try:
-        committee.members[1].partial_decrypt(wraps[0], scope)
-        raise AssertionError("a member must not answer for a wrap outside the approved scope")
-    except PermissionError:
-        pass
-    assert committee.open_session_keys(Scope(period="2026-01"), wraps, [2, 4, 5], verify_proofs=True)
+    assert committee.open_session_keys(Scope(period="2026-01", camera_ids=frozenset({99})), wraps, [1, 2, 3]) == {}
+    assert committee.open_session_keys(Scope(period="2026-01"), wraps, [2, 4, 5])
 
 
-def test_reconstructed_secret_opens_every_session_of_the_period():
-    """Why the system does not use plain Shamir reconstruction for the Busca Total."""
+def test_recovered_month_key_opens_every_session_of_the_period():
+    """
+    The trade-off of reconstructing the key (the specification's design, built from library
+    primitives): whoever holds the recovered key opens every day of the month, so the
+    camera/day scope of an activation is procedural, not cryptographic.
+    """
     committee = EmergencyCommittee(threshold_t=2, n_members=3)
-    camera = Camera(id=7, location_id=7, puzzle_level=16, escrow=CameraEscrow(7, committee.public_key))
+    camera = _escrowed_camera(committee)
     records = [camera.encrypt_plate("AAA0000", DAY1), camera.encrypt_plate("BBB0000", DAY2)]
     wraps = camera.drain_session_wraps()
-    secret = committee.reconstruct_period_secret("2026-01", [1, 3])
-    from crypto.escrow import unwrap_session_key, wrap_context
+    shares = [committee.members[i].release_share(Scope(period="2026-01", sessions=frozenset({"2026-01-01"})))
+              for i in (1, 3)]
+    private_key = committee._recover("2026-01", shares)
     for record, wrap, plate in zip(records, wraps, ("AAA0000", "BBB0000")):
-        kem_key = threshold.decapsulate(secret, p256.decode(wrap.r), wrap_context(wrap.camera_id, wrap.period, wrap.session))
-        assert open_with_session_key(record, unwrap_session_key(wrap, kem_key)) == plate
+        assert open_with_session_key(record, unwrap_session_key(wrap, private_key)) == plate
+    other_month = Scope(period="2026-02")
+    committee.public_key("2026-02")
+    try:  # ...but not another month: each month has its own key (RNF04)
+        unwrap_session_key(wraps[0], committee._recover("2026-02", [committee.members[i].release_share(other_month)
+                                                                    for i in (1, 3)]))
+        raise AssertionError("February's key must not open a January wrap")
+    except InvalidTag:
+        pass
 
 
 def test_block_crumpling():

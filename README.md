@@ -35,8 +35,9 @@ A Arquitetura 3.0 resolve a vulnerabilidade de exposição da arquitetura (3) ao
 crypto/            esquema de crumpling (AES-256-GCM com AD = câmera e instante) e puzzle de prova de trabalho;
                    assinatura ECDSA dos registros pela câmera (signing); tokens de autorização (tokens) e
                    cadeia de hash do log e do boletim (hashchain);
-                   amassamento por bloco (block_crumpling), ElGamal de limiar sobre P-256
-                   (p256, threshold) e custódia da chave de sessão para a Busca Total (escrow)
+                   amassamento por bloco (block_crumpling) e custódia da chave de sessão para a Busca Total
+                   (escrow: HPKE X25519 do pacote cryptography). Nenhum algoritmo criptográfico é
+                   implementado aqui: o código só compõe primitivas de cryptography e PyCryptodome
 database/          conexão e migrações do banco (Postgres)
 entities/          Record, Blocklist, BlocklistEntry, Alert, BlockHeader, SessionKeyWrap, AuthToken
 services/          Camera, Police, Server, EmergencyCommittee; governança: LegalAuthorizer (judge), CustodyGateway
@@ -78,7 +79,7 @@ Simulação da **Cidade Universitária (USP, Butantã)**: cada cruzamento é um 
 - **Busca fechada** (placa conhecida): resolve os puzzles do crime e, câmera a câmera, os dos vizinhos mais prováveis até achar o carro.
 - **Busca aberta** (placa desconhecida): decifra todos os registros da janela do crime, filtra pelas letras da placa lembradas e segue cada suspeito.
 - **BOLO normal**: as câmeras alertam em claro, sem puzzle, mas só para avistamentos posteriores ao aviso.
-- **Busca total**: um quórum do Comitê de Emergência (4 de 8) decifra por limiar as chaves de sessão que as câmeras custodiaram; todos os registros do dia abrem sem puzzle. Abaixo do quórum a busca é recusada.
+- **Busca total**: um quórum do Comitê de Emergência (4 de 8) reúne seus fragmentos de Shamir (PyCryptodome), recupera a chave X25519 do mês e abre as chaves de sessão que as câmeras custodiaram com HPKE; todos os registros do dia abrem sem puzzle. Abaixo do quórum a busca é recusada.
 
 A opção "um puzzle por bloco de 10 min" troca o puzzle por registro por um único puzzle de tamanho N por câmera a cada 10 minutos simulados (amassamento por bloco): quem o resolve abre todos os registros do bloco.
 
@@ -98,7 +99,7 @@ python -m simulation.tolls build ~/Downloads/volume_horario_2026   # regera o ag
 ```
 
 O grafo já vem em `simulation/data/city.json`. Para regerá-lo: `pip install -r requirements-osm.txt && python scripts/download_city.py`.
-Bancos já inicializados recebem a coluna `run_id` e as tabelas de blocos e de custódia automaticamente (`Server.ensure_schema()`); as migrations `002_add_run_id.sql`, `003_blocks_and_escrow.sql`, `004_record_signature.sql` e `005_audit_log.sql` cobrem bancos novos.
+Bancos já inicializados recebem a coluna `run_id` e as tabelas de blocos e de custódia automaticamente (`Server.ensure_schema()`); as migrations `002_add_run_id.sql`, `003_blocks_and_escrow.sql`, `004_record_signature.sql`, `005_audit_log.sql` e `006_hpke_session_wraps.sql` cobrem bancos novos.
 
 O código implementa e valida experimentalmente os conceitos de *crumpling*, puzzle de prova de trabalho e busca aberta/fechada descritos no relatório, além do fluxo BOLO (Seção 3.1) integrado à câmera.
 

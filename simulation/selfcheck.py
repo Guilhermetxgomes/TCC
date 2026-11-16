@@ -67,8 +67,8 @@ def run_seed(graph: CityGraph, server, seed: int) -> None:
           "busca_total recovers the criminal's complete route")
     check(total["totals"]["records_tested"] == world.params["records"],
           "busca_total opens every record of the session")
-    check(extra["partial_decryptions"] == extra["threshold"] * extra["wraps_opened"],
-          f"busca_total used {extra['threshold']} partial decryptions per camera wrap")
+    check(extra["shares_released"] == extra["threshold"],
+          f"busca_total recovered the month key from {extra['threshold']} Shamir shares")
     check(extra["other_plates_exposed"] == world.params["n_vehicles"] - 1,
           "busca_total exposes every other vehicle too")
     try:

@@ -29,6 +29,8 @@ ENSURE_SCHEMA_SQL = """
     );
     CREATE INDEX IF NOT EXISTS idx_session_key_wraps_run_period_session
         ON session_key_wraps (run_id, period, session, camera_id);
+    ALTER TABLE session_key_wraps DROP COLUMN IF EXISTS r;
+    ALTER TABLE session_key_wraps DROP COLUMN IF EXISTS nonce;
 
     ALTER TABLE open_search_records ADD COLUMN IF NOT EXISTS signature TEXT;
 
@@ -198,13 +200,13 @@ class Server:
         if not wraps:
             return
         rows = [
-            (run_id, w.camera_id, w.period, w.session, _b64(w.r), _b64(w.nonce), _b64(w.wrapped))
+            (run_id, w.camera_id, w.period, w.session, _b64(w.wrapped))
             for w in wraps
         ]
         cursor = self.conn.cursor()
         execute_values(
             cursor,
-            "INSERT INTO session_key_wraps (run_id, camera_id, period, session, r, nonce, wrapped) VALUES %s",
+            "INSERT INTO session_key_wraps (run_id, camera_id, period, session, wrapped) VALUES %s",
             rows,
         )
         self.conn.commit()
@@ -215,7 +217,7 @@ class Server:
         cursor = self.conn.cursor()
         cursor.execute(
             """
-            SELECT camera_id, period, session, r, nonce, wrapped FROM session_key_wraps
+            SELECT camera_id, period, session, wrapped FROM session_key_wraps
             WHERE run_id = %s AND period = %s AND (%s IS NULL OR session = %s)
             ORDER BY session ASC, camera_id ASC
             """,
@@ -224,11 +226,9 @@ class Server:
         rows = cursor.fetchall()
         cursor.close()
         return [
-            SessionKeyWrap(
-                camera_id=camera, period=wrap_period, session=wrap_session, r=base64.b64decode(r),
-                nonce=base64.b64decode(nonce), wrapped=base64.b64decode(wrapped),
-            )
-            for camera, wrap_period, wrap_session, r, nonce, wrapped in rows
+            SessionKeyWrap(camera_id=camera, period=wrap_period, session=wrap_session,
+                           wrapped=base64.b64decode(wrapped))
+            for camera, wrap_period, wrap_session, wrapped in rows
         ]
 
     def get_rows_for_camera(self, run_id: str, camera_id: int, limit: int = 100, offset: int = 0) -> dict:

@@ -26,7 +26,6 @@ import sys
 import time
 from pathlib import Path
 
-from crypto import p256, threshold
 from crypto.block_crumpling import solve_block
 from crypto.escrow import CameraEscrow, open_with_session_key
 from crypto.puzzle import solve_puzzle
@@ -134,7 +133,7 @@ def e2(captures: int = 3000) -> None:
                 "bytes_por_registro": len(record.c_prime) + len(record.nonce) + len(record.ciphertext)
                 + len(record.signature or b""),
                 "bytes_por_bloco": sum(len(h.c_prime) + len(h.check_nonce) + len(h.check_tag) for h in headers),
-                "bytes_por_sessao": sum(len(w.r) + len(w.nonce) + len(w.wrapped) for w in wraps),
+                "bytes_por_sessao": sum(len(w.wrapped) for w in wraps),
             })
     started = time.perf_counter()
     for day in range(1, 21):  # one new session (key wrap) per day
@@ -286,31 +285,33 @@ def timed_ms(function, repetitions: int) -> float:
     return (time.perf_counter() - started) / repetitions * 1e3
 
 
-def e4(configurations=((2, 3), (4, 8), (8, 15)), repetitions: int = 15, records: int = 3000) -> None:
+def e4(configurations=((2, 3), (4, 8), (8, 15)), repetitions: int = 200, records: int = 3000) -> None:
+    """
+    Busca Total built from library primitives: X25519 HPKE (`cryptography`) for the camera's
+    wrap, Shamir (PyCryptodome) over a 128-bit KEK that seals the month's X25519 key.
+    """
+    from crypto.escrow import unwrap_session_key
     rows = []
     for t, n in configurations:
-        public, shares = threshold.deal(t, n)
-        r_point, key = threshold.encapsulate(public, b"ctx")
-        partials = [threshold.partial_decrypt(share, r_point) for share in shares[:t]]
-        proof = threshold.prove_partial(shares[0], r_point, partials[0])
-        assert threshold.combine(public, r_point, partials, b"ctx") == key
+        committee = EmergencyCommittee(t, n)
+        committee.public_key("2026-01")
+        escrow = CameraEscrow(1, committee.public_key)
+        escrow.session_key("2026-01-01T08:00:00+00:00")
+        wrap = escrow.drain_wraps()[0]
+        scope = Scope(period="2026-01")
+        shares = [committee.members[i].release_share(scope) for i in range(1, t + 1)]
+        private_key = committee._recover("2026-01", shares)
         rows.append({
             "t": t, "n": n,
-            "gerar_chave_ms": round(timed_ms(lambda: threshold.deal(t, n), 3), 2),
-            "embrulhar_camera_ms": round(timed_ms(lambda: threshold.encapsulate(public, b"ctx"), repetitions), 2),
-            "decifragem_parcial_ms": round(timed_ms(lambda: threshold.partial_decrypt(shares[0], r_point), repetitions), 2),
-            "prova_ms": round(timed_ms(lambda: threshold.prove_partial(shares[0], r_point, partials[0]), repetitions), 2),
-            "verificar_prova_ms": round(timed_ms(lambda: threshold.verify_partial(public, r_point, partials[0], proof), repetitions), 2),
-            "combinar_t_parciais_ms": round(timed_ms(lambda: threshold.combine(public, r_point, partials, b"ctx"), repetitions), 2),
-            "abrir_1_embrulho_ms": None,
-            "shamir_reconstruir_ms": round(timed_ms(lambda: threshold.reconstruct_secret(shares[:t]), repetitions), 3),
-            "shamir_abrir_1_embrulho_ms": None,
+            "gerar_selar_repartir_ms": round(timed_ms(lambda: EmergencyCommittee(t, n).public_key("2026-01"), 50), 3),
+            "embrulhar_camera_ms": round(timed_ms(
+                lambda: CameraEscrow(1, committee.public_key).session_key("2026-01-01T08:00:00+00:00"), repetitions), 3),
+            "entregar_fragmento_ms": round(timed_ms(lambda: committee.members[1].release_share(scope), repetitions), 4),
+            "reunir_t_fragmentos_ms": round(timed_ms(lambda: committee._recover("2026-01", shares), repetitions), 3),
+            "abrir_1_embrulho_ms": round(timed_ms(lambda: unwrap_session_key(wrap, private_key), repetitions), 3),
+            "bytes_embrulho": len(wrap.wrapped),
+            "bytes_fragmento": len(shares[0][1]),
         })
-        secret = threshold.reconstruct_secret(shares[:t])
-        rows[-1]["shamir_abrir_1_embrulho_ms"] = round(
-            timed_ms(lambda: threshold.decapsulate(secret, r_point, b"ctx"), repetitions), 2)
-        rows[-1]["abrir_1_embrulho_ms"] = round(
-            t * rows[-1]["decifragem_parcial_ms"] + rows[-1]["combinar_t_parciais_ms"], 2)
     write_csv("e4_comite", rows)
 
     # Once a session key is open: records per second through the escrow path.

@@ -9,9 +9,10 @@ The three ways of looking for the criminal's car after the crime:
   traced like in busca_fechada.
 - bolo: the police broadcasts the plate to every camera, which then alert in the clear
   (no puzzle) -- but only about sightings after the broadcast.
-- busca_total: exceptional access. A quorum of the Emergency Committee threshold-decrypts
-  the session keys the cameras escrowed, and every record of the session is opened
-  without any puzzle -- the criminal's whole route, and everybody else's.
+- busca_total: exceptional access. A quorum of the Emergency Committee recovers the month's
+  key from its Shamir shares and opens the session keys the cameras escrowed, and every
+  record of the session is opened without any puzzle -- the criminal's whole route, and
+  everybody else's.
 
 Every record is checked against its camera's signature (World.camera_keys) before any
 puzzle is attempted; a record that fails -- moved to another camera or instant, or
@@ -346,9 +347,10 @@ class Investigator:
                     camera_ids: Optional[list[int]] = None, publish: bool = True) -> dict:
         """
         Exceptional access: the committee members in `member_indexes` (default: the first
-        t) threshold-decrypt the escrowed session keys of the crime's session -- for every
-        camera, or only for `camera_ids` -- and each record of those cameras in that
-        session is opened with one HMAC instead of a puzzle. Raises
+        t) release their Shamir shares, the month's key is recovered and opens the escrowed
+        session keys of the crime's session -- for every camera, or only for `camera_ids` --
+        and each record of those cameras in that session is opened with one HMAC instead of
+        a puzzle. Raises
         services.committee.QuorumError when fewer than t members take part.
 
         The cost is not computational but institutional (a quorum has to agree), and the
@@ -452,7 +454,7 @@ class Investigator:
             "period": period, "session": session,
             "threshold": committee.threshold, "committee_members": len(committee.members),
             "members": activation["members"], "wraps_opened": activation["wraps_opened"],
-            "partial_decryptions": activation["partial_decryptions"], "committee_seconds": committee_seconds,
+            "shares_released": activation["shares_released"], "committee_seconds": committee_seconds,
             "plates_exposed": len(plates), "other_plates_exposed": len(plates - {crime.plate}),
             "sightings_before_crime": sum(1 for tick, _ in sightings if tick < crime.tick),
         }

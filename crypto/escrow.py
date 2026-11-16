@@ -3,7 +3,9 @@ Key escrow for the Busca Total (exceptional access through the Emergency Committ
 
 Each camera keeps one random session key per session (by default per day) and sends
 it to the server encrypted to the committee's public key of the month (a
-SessionKeyWrap). While escrow is on, the camera does not draw the puzzle secrets at
+SessionKeyWrap), with HPKE (RFC 9180: X25519 + HKDF-SHA256 + AES-256-GCM, from the
+`cryptography` package), the context (camera, period, session) going into HPKE's
+`info` so a wrap only opens as what it claims to be. While escrow is on, the camera does not draw the puzzle secrets at
 random: it derives them from the session key,
 
     k = HMAC-SHA256(session_key, label || c') mod n
@@ -11,8 +13,8 @@ random: it derives them from the session key,
 so the ciphertexts and puzzles stored in the database are exactly the usual ones --
 Busca Aberta and Busca Fechada work unchanged, by brute force -- but whoever holds the
 session key computes each k with one HMAC instead of ~n attempts. The session key can
-only be recovered by a quorum of the committee (crypto/threshold.py), one camera and
-one session at a time.
+only be recovered with the month's private key, which exists only as Shamir shares held
+by the committee (services/committee.py).
 
 Without the session key, k is indistinguishable from a uniform draw in [0, n) (HMAC
 as a PRF; the modulo bias is at most n / 2^256), and a solved puzzle reveals log2(n)
@@ -26,9 +28,9 @@ import hmac
 import os
 from typing import Callable, Optional
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives import hpke
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 
-from crypto import p256, threshold
 from crypto.block_crumpling import block_key_from_secret
 from crypto.puzzle import open_record
 from entities.block_header import BlockHeader
@@ -37,6 +39,9 @@ from entities.session_key_wrap import SessionKeyWrap
 
 # A time slot is a prefix of the ISO-8601 capture timestamp ("2026-01-01T08:17:30...").
 GRANULARITY = {"month": 7, "day": 10, "hour": 13, "10min": 15, "minute": 16}
+
+# HPKE suite of the session-key wraps (Curve25519, as in RF04/RF05 of the specification).
+WRAP_SUITE = hpke.Suite(hpke.KEM.X25519, hpke.KDF.HKDF_SHA256, hpke.AEAD.AES_256_GCM)
 
 RECORD_LABEL = b"record-k"
 BLOCK_LABEL = b"block-k"
@@ -58,7 +63,7 @@ def derive_secret(session_key: bytes, label: bytes, c_prime: bytes, n: int) -> i
 class CameraEscrow:
     """The escrow state of one camera: the session key in use and the wraps not yet uploaded."""
 
-    def __init__(self, camera_id: int, public_key_for: Callable[[str], threshold.PublicKey],
+    def __init__(self, camera_id: int, public_key_for: Callable[[str], X25519PublicKey],
                  session_granularity: str = "day"):
         if GRANULARITY[session_granularity] < GRANULARITY["month"]:
             raise ValueError("a session cannot span more than one committee period (month)")
@@ -75,12 +80,10 @@ class CameraEscrow:
         if session != self._session:
             period = time_slot(captured_at, "month")
             context = wrap_context(self.camera_id, period, session)
-            r_point, kem_key = threshold.encapsulate(self._public_key_for(period), context)
             key = os.urandom(32)
-            nonce = os.urandom(12)
             self._pending.append(SessionKeyWrap(
-                camera_id=self.camera_id, period=period, session=session, r=p256.encode(r_point),
-                nonce=nonce, wrapped=AESGCM(kem_key).encrypt(nonce, key, context),
+                camera_id=self.camera_id, period=period, session=session,
+                wrapped=WRAP_SUITE.encrypt(key, self._public_key_for(period), info=context),
             ))
             self._session, self._key = session, key
         return self._key
@@ -90,9 +93,9 @@ class CameraEscrow:
         return wraps
 
 
-def unwrap_session_key(wrap: SessionKeyWrap, kem_key: bytes) -> bytes:
-    """Raises InvalidTag when kem_key is wrong (e.g. combined from fewer than t partials)."""
-    return AESGCM(kem_key).decrypt(wrap.nonce, wrap.wrapped, wrap_context(wrap.camera_id, wrap.period, wrap.session))
+def unwrap_session_key(wrap: SessionKeyWrap, private_key: X25519PrivateKey) -> bytes:
+    """Raises InvalidTag when the key is not the period's or the wrap's context was altered."""
+    return WRAP_SUITE.decrypt(wrap.wrapped, private_key, info=wrap_context(wrap.camera_id, wrap.period, wrap.session))
 
 
 def open_with_session_key(record: Record, session_key: bytes, header: Optional[BlockHeader] = None) -> str:

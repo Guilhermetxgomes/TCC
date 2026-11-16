@@ -324,7 +324,7 @@ const MODE_NOTES = {
   fechada: "Placa conhecida: resolve os puzzles do crime e, câmera a câmera, os dos vizinhos mais prováveis até achar o carro.",
   aberta: "Placa desconhecida: decifra TODOS os registros da janela do crime, filtra pelas letras lembradas e segue cada suspeito.",
   bolo: "As câmeras alertam em claro (sem puzzle), mas só para avistamentos depois do aviso: o passado não é coberto.",
-  total: "Acesso excepcional: um quórum do Comitê de Emergência decifra por limiar as chaves de sessão das câmeras e TODOS os registros do dia abrem sem puzzle.",
+  total: "Acesso excepcional: um quórum do Comitê de Emergência reúne seus fragmentos de Shamir, recupera a chave do mês (X25519), abre as chaves de sessão das câmeras e TODOS os registros do dia abrem sem puzzle.",
 };
 
 function updateModeUi() {
@@ -384,7 +384,7 @@ function renderStats(result, partial) {
       rows.push(...statRow("custo de puzzle", "nenhum (chave de sessão via quórum)"));
       rows.push(...statRow("deputados que participaram", `${x.members.join(", ")} (limiar ${x.threshold} de ${x.committee_members})`));
       rows.push(...statRow("chaves de sessão abertas", `${x.wraps_opened} (sessão ${x.session})`));
-      rows.push(...statRow("decifragens parciais", String(x.partial_decryptions)));
+      rows.push(...statRow("fragmentos de Shamir entregues", String(x.shares_released)));
       rows.push(...statRow("tempo do comitê", fmtDuration(x.committee_seconds)));
       rows.push(...statRow("outras placas expostas", String(x.other_plates_exposed), "bad"));
       rows.push(...statRow("avistamentos antes do crime", String(x.sightings_before_crime)));
