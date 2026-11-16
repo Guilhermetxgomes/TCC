@@ -8,6 +8,7 @@ It exists so that the simulation backend can be checked without Postgres:
 It is NOT used by the web app or by the main_*.py scripts, which keep talking to the
 real database; the selfcheck without --memory is still the one that exercises the SQL.
 """
+import copy
 from typing import Optional
 
 from entities.block_header import BlockHeader
@@ -21,6 +22,7 @@ class MemoryServer:
         self._headers: dict[tuple, BlockHeader] = {}
         self._wraps: list[tuple[Optional[str], SessionKeyWrap]] = []
         self._next_id = 1
+        self._audit: list[tuple[Optional[str], dict]] = []
 
     def close(self):
         pass
@@ -94,7 +96,22 @@ class MemoryServer:
         ]
         return sorted(wraps, key=lambda wrap: (wrap.session, wrap.camera_id))
 
+    def append_audit(self, run_id: str, entry: dict):
+        self._audit.append((run_id, copy.deepcopy(entry)))
+
+    def get_audit_log(self, run_id: str) -> list[dict]:
+        rows = [copy.deepcopy(entry) for entry_run, entry in self._audit if entry_run == run_id]
+        return sorted(rows, key=lambda entry: entry["seq"])
+
+    def get_audit_head(self, run_id: str) -> Optional[dict]:
+        rows = [entry for entry_run, entry in self._audit if entry_run == run_id]
+        return copy.deepcopy(max(rows, key=lambda entry: entry["seq"])) if rows else None
+
+    def delete_audit(self, run_id: str, seqs: list[int]):
+        self._audit = [(r, e) for r, e in self._audit if not (r == run_id and e["seq"] in set(seqs))]
+
     def clear_run(self, run_id: str):
+        self._audit = [(r, e) for r, e in self._audit if r != run_id]
         self._rows = [row for row in self._rows if row["run_id"] != run_id]
         self._headers = {key: header for key, header in self._headers.items() if key[0] != run_id}
         self._wraps = [(wrap_run, wrap) for wrap_run, wrap in self._wraps if wrap_run != run_id]

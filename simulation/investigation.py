@@ -22,6 +22,15 @@ With block crumpling (World.params["block_level"]) busca_fechada and busca_abert
 solve the puzzle of each block they touch (once per camera and time slot) and then the
 records inside it.
 
+With governance (World.governance, services/governance.py) the investigator never reads the
+database directly: it asks the judge for a token and the Servidor releases rows only through
+services/custody.CustodyGateway, which checks the token and logs the release. busca_fechada
+uses one Busca Fechada token (plate + deadline + budget); busca_aberta one Busca Aberta token
+for the crime window plus one Busca Fechada token per suspect it follows; busca_total one
+Busca Total token, published in the public bulletin before the committee decrypts. Every
+record the investigator opens is declared to the Auditor with its solution k. A refused
+request becomes a "denied" step and stops that line of the search.
+
 Every function returns the list of `steps` that the web UI animates, the traced paths and
 the cost (measured with the real, small puzzle_level + extrapolated to a realistic one).
 """
@@ -37,6 +46,9 @@ from crypto.signing import verify_record
 from entities.blocklist import Blocklist
 from services.camera import Camera
 from services.committee import Scope
+from services.custody import AuthorizationError, CustodyGateway
+from services.governance import DEFAULT_OPERATOR
+from services.judge import DEFAULT_BUDGET_RECORDS
 from services.police import Police
 from simulation import costs
 from simulation.city_graph import CityGraph
@@ -53,20 +65,71 @@ if TYPE_CHECKING:  # only a type hint: lets the simulation run on simulation.mem
 
 
 class Investigator:
-    def __init__(self, graph: CityGraph, server: "Server", world: World):
+    def __init__(self, graph: CityGraph, server: "Server", world: World, operator_id: str = DEFAULT_OPERATOR,
+                 now: Optional[str] = None, budget_records: int = DEFAULT_BUDGET_RECORDS):
         self.graph = graph
         self.server = server
         self.world = world
         self.clock = world.clock
         self.run_id = world.run_id
-        self._block_keys: dict[tuple[int, str], bytes] = {}  # blocks this investigator already paid for
+        self._block_keys: dict[tuple[int, str], tuple[bytes, int]] = {}  # blocks already paid for: (key, k)
+        self.operator_id = operator_id
+        self.now = now or world.investigation_time()
+        self.budget_records = budget_records
+        self.gov = world.governance
+        self.gateway: Optional[CustodyGateway] = None
+        self.token = None  # token in use by the current line of the search
+        self.tokens: list = []  # every token this investigator obtained
+        self.denials: list[dict] = []
+        self.declared = 0
+        if self.gov is not None:
+            self.gateway = CustodyGateway(server, self.run_id, self.gov.judge.public_key,
+                                          self.gov.audit_log(server, self.run_id), lambda: self.now)
+            head = server.get_audit_head(self.run_id)
+            self._log_start = head["seq"] if head else 0
+
+    # -- governance -----------------------------------------------------
+
+    def _use(self, token):
+        self.token = token
+        self.tokens.append(token)
+        return token
+
+    def _token_fechada(self, plate: str):
+        if self.gov is None:
+            return None
+        return self._use(self.gov.judge.issue_fechada(self.operator_id, plate, self.now, self.budget_records))
+
+    def _declare(self, row: dict, result: dict, kind: str) -> None:
+        if self.gov is None or self.token is None:
+            return
+        record = row["record"]
+        block_k = self._block_keys[(record.camera_id, record.block)][1] if record.block is not None else None
+        self.gov.declare(self.token.token_id, self.operator_id, row["record_id"], result["k_found"], self.now,
+                         block_k, kind)
+        self.declared += 1
+
+    def _denied_step(self, error: AuthorizationError, node: int, tick_from=None, tick_to=None, **extra) -> dict:
+        step = {
+            "kind": "denied", "node": node, "from_tick": tick_from, "to_tick": tick_to, "found": False,
+            "records_in_window": 0, "records_tested": 0, "attempts": 0, "real_seconds": 0.0,
+            "reason": error.reason, "token_id": self.token.token_id if self.token else None, **extra,
+        }
+        self.denials.append({"node": node, "reason": error.reason, "token_id": step["token_id"]})
+        return step
 
     # -- building blocks ------------------------------------------------
 
     def _window(self, node: int, tick_from: int, tick_to: int) -> list[dict]:
-        return self.server.get_rows_in_window(
-            self.run_id, node, self.clock.iso(max(tick_from, 0)), self.clock.iso(tick_to)
-        )
+        start, end = self.clock.iso(max(tick_from, 0)), self.clock.iso(tick_to)
+        if self.gateway is None:
+            return self.server.get_rows_in_window(self.run_id, node, start, end)
+        return self.gateway.release_window(self.token, self.operator_id, node, start, end)
+
+    def _header(self, camera_id: int, block: str):
+        if self.gateway is None:
+            return self.server.get_block_header(self.run_id, camera_id, block)
+        return self.gateway.block_header(self.token, self.operator_id, camera_id, block)
 
     def _probe(self, node: int, tick_from: int, tick_to: int, plate: str) -> dict:
         """Solves the puzzles of one camera window in order until `plate` shows up."""
@@ -76,10 +139,15 @@ class Investigator:
             "records_in_window": len(rows), "records_tested": 0, "attempts": 0,
             "blocks_solved": 0, "block_attempts": 0, "rejected": 0, "rejected_ids": [],
             "real_seconds": 0.0, "found": False, "tick": None, "record_id": None,
+            "token_id": self.token.token_id if self.token else None,
         }
         for row in rows:
             result = self._solve(row, step)
-            if result is not None and result["plate"] == plate:
+            if result is None:
+                continue
+            hit = result["plate"] == plate
+            self._declare(row, result, "acerto" if hit else "colateral")  # every decryption is declared
+            if hit:
                 step.update(found=True, tick=self.clock.tick_of(row["captured_at"]), record_id=row["record_id"])
                 break
         return step
@@ -108,13 +176,13 @@ class Investigator:
         if record.block is not None:
             cache_key = (record.camera_id, record.block)
             if cache_key not in self._block_keys:
-                solved = solve_block(self.server.get_block_header(self.run_id, record.camera_id, record.block))
-                self._block_keys[cache_key] = solved["key"]
+                solved = solve_block(self._header(record.camera_id, record.block))
+                self._block_keys[cache_key] = (solved["key"], solved["k_found"])
                 step["blocks_solved"] += 1
                 step["block_attempts"] += solved["attempts"]
                 step["attempts"] += solved["attempts"]
                 step["real_seconds"] += solved["elapsed_seconds"]
-            prefix = self._block_keys[cache_key]
+            prefix = self._block_keys[cache_key][0]
         result = solve_puzzle(record, key_prefix=prefix)
         step["records_tested"] += 1
         step["attempts"] += result["attempts"]
@@ -129,7 +197,8 @@ class Investigator:
         every hop moves at least one tick forward and there are no records past the end
         of the recording. Returns (steps, path, stop_reason), where stop_reason is
         "max_hops" (limit reached) or "lost" (no camera has the plate in its window:
-        end of the recording or a lost trail).
+        end of the recording or a lost trail) or "denied" (the Servidor refused a window:
+        the token expired or its budget ran out).
         """
         steps, path = [], [(node, tick)]
         previous = None  # the investigator does not know where the car came from
@@ -148,7 +217,12 @@ class Investigator:
                 order.append(previous)
             for candidate in order:
                 low, high = travel_window(self.graph, node, candidate)
-                step = self._probe(candidate, tick + low, tick + high, plate)
+                try:
+                    step = self._probe(candidate, tick + low, tick + high, plate)
+                except AuthorizationError as error:
+                    steps.append(self._denied_step(error, candidate, tick + low, tick + high, from_node=node,
+                                                   p=probs.get(candidate, 0.0), suspect=suspect))
+                    return steps, path, "denied"
                 step.update(from_node=node, p=probs.get(candidate, 0.0), suspect=suspect)
                 steps.append(step)
                 if step["found"]:
@@ -166,7 +240,13 @@ class Investigator:
     def busca_fechada(self, window_ticks: int = DEFAULT_WINDOW_TICKS, max_hops: Optional[int] = DEFAULT_MAX_HOPS,
                       realistic_n: int = DEFAULT_REALISTIC_N, realistic_t: int = DEFAULT_REALISTIC_T) -> dict:
         crime = self.world.crime
-        first = self._probe(crime.node, crime.tick - window_ticks, crime.tick + window_ticks, crime.plate)
+        self._token_fechada(crime.plate)
+        try:
+            first = self._probe(crime.node, crime.tick - window_ticks, crime.tick + window_ticks, crime.plate)
+        except AuthorizationError as error:
+            denied = self._denied_step(error, crime.node, crime.tick - window_ticks, crime.tick + window_ticks,
+                                       from_node=None, p=None, suspect=crime.plate)
+            return self._result("fechada", [denied], [], realistic_n, realistic_t=realistic_t)
         first.update(from_node=None, p=None, suspect=crime.plate)
         steps, paths = [first], []
         if first["found"]:
@@ -179,18 +259,28 @@ class Investigator:
                      max_hops: Optional[int] = DEFAULT_MAX_HOPS, max_suspects: int = DEFAULT_MAX_SUSPECTS,
                      realistic_n: int = DEFAULT_REALISTIC_N, realistic_t: int = DEFAULT_REALISTIC_T) -> dict:
         crime = self.world.crime
-        rows = self._window(crime.node, crime.tick - window_ticks, crime.tick + window_ticks)
+        if self.gov is not None:
+            self._use(self.gov.judge.issue_aberta(
+                self.operator_id, crime.node, self.clock.iso(max(crime.tick - window_ticks, 0)),
+                self.clock.iso(crime.tick + window_ticks), self.now))
+        try:
+            rows = self._window(crime.node, crime.tick - window_ticks, crime.tick + window_ticks)
+        except AuthorizationError as error:
+            denied = self._denied_step(error, crime.node, crime.tick - window_ticks, crime.tick + window_ticks)
+            return self._result("aberta", [denied], [], realistic_n, realistic_t=realistic_t)
         decrypt = {
             "kind": "decrypt_window", "node": crime.node, "from_tick": crime.tick - window_ticks,
             "to_tick": crime.tick + window_ticks, "records_in_window": len(rows),
             "records_tested": 0, "attempts": 0, "blocks_solved": 0, "block_attempts": 0,
             "rejected": 0, "rejected_ids": [], "real_seconds": 0.0, "found": False,
+            "token_id": self.token.token_id if self.token else None,
         }
         candidates = []  # (plate, tick) decrypted from the window
         for row in rows:
             result = self._solve(row, decrypt)
             if result is None:
                 continue
+            self._declare(row, result, "janela")  # in a Busca Aberta every record of the window is in scope
             candidates.append((result["plate"], self.clock.tick_of(row["captured_at"])))
 
         hint = crime.plate[:hint_len]  # what a witness remembers
@@ -198,6 +288,7 @@ class Investigator:
         decrypt.update(candidates=len(candidates), hint=hint, suspects=len(suspects))
         steps, paths = [decrypt], []
         for plate, tick in suspects[:max_suspects]:
+            self._token_fechada(plate)  # following a candidate is a search for a known plate: new order
             trace_steps, path, stop = self._trace(plate, crime.node, tick, max_hops, plate)
             steps += trace_steps
             paths.append({"plate": plate, "is_criminal": plate == crime.plate, "nodes": path, "stopped_by": stop})
@@ -252,7 +343,7 @@ class Investigator:
         return result
 
     def busca_total(self, member_indexes: Optional[list[int]] = None,
-                    camera_ids: Optional[list[int]] = None) -> dict:
+                    camera_ids: Optional[list[int]] = None, publish: bool = True) -> dict:
         """
         Exceptional access: the committee members in `member_indexes` (default: the first
         t) threshold-decrypt the escrowed session keys of the crime's session -- for every
@@ -263,6 +354,10 @@ class Investigator:
         The cost is not computational but institutional (a quorum has to agree), and the
         exposure is total: `extra` reports how many plates other than the criminal's
         were revealed.
+
+        With governance the judge issues a Busca Total token for exactly this scope, the
+        activation is published in the public bulletin first (publish=False skips it, and the
+        members then refuse: PermissionError), and a closing entry publishes what was opened.
         """
         committee = self.world.committee
         if committee is None:
@@ -273,28 +368,46 @@ class Investigator:
         session = time_slot(crime_time, self.world.params["session_granularity"])
         if member_indexes is None:
             member_indexes = list(range(1, committee.threshold + 1))
+        reason = f"crime at camera {crime.node}, {crime_time}"
+        token, receipt = None, None
+        if self.gov is not None:
+            token = self._use(self.gov.judge.issue_total(self.operator_id, period, [session], camera_ids, reason,
+                                                         self.now))
+            if publish:
+                receipt = self.gov.bulletin.publish("activation", self.now, token.token_id, {
+                    "period": period, "sessions": [session], "camera_ids": sorted(camera_ids) if camera_ids else None,
+                    "reason": reason, "members": sorted(member_indexes), "threshold": committee.threshold,
+                })
         scope = Scope(
             period=period, sessions=frozenset({session}),
             camera_ids=frozenset(camera_ids) if camera_ids is not None else None,
-            reason=f"crime at camera {crime.node}, {crime_time}",
+            reason=reason, token=token, receipt=receipt,
         )
 
+        if len(set(member_indexes)) >= committee.threshold:
+            committee.check_request(scope)  # members refuse an unpublished or out-of-token request
+        if self.gateway is not None:
+            wraps = self.gateway.release_wraps(token, self.operator_id, period, session)
+        else:
+            wraps = self.server.get_session_wraps(self.run_id, period, session)
         started = time.perf_counter()
-        session_keys = committee.open_session_keys(
-            scope, self.server.get_session_wraps(self.run_id, period, session), member_indexes
-        )
+        session_keys = committee.open_session_keys(scope, wraps, member_indexes)
         committee_seconds = time.perf_counter() - started
         activation = committee.activations[-1]
         steps = [{
             "kind": "quorum", "node": crime.node, "tick": None, "found": False, "records_tested": 0,
             "attempts": 0, "real_seconds": committee_seconds, "members": activation["members"],
-            "wraps_opened": activation["wraps_opened"],
+            "wraps_opened": activation["wraps_opened"], "token_id": token.token_id if token else None,
+            "bulletin_seq": receipt["seq"] if receipt else None,
         }]
 
         plates: set[str] = set()
         sightings = []  # (tick, node) of the criminal's plate, from every opened camera
         for (camera_id, _), session_key in sorted(session_keys.items()):
-            rows = self.server.get_rows_in_session(self.run_id, camera_id, session)
+            if self.gateway is not None:
+                rows = self.gateway.release_session(token, self.operator_id, camera_id, session)
+            else:
+                rows = self.server.get_rows_in_session(self.run_id, camera_id, session)
             step = {
                 "kind": "open_session", "node": camera_id, "tick": None, "found": False, "record_id": None,
                 "records_in_window": len(rows), "records_tested": 0, "attempts": 0, "real_seconds": 0.0,
@@ -309,7 +422,7 @@ class Investigator:
                 header = None
                 if record.block is not None:
                     if record.block not in headers:
-                        headers[record.block] = self.server.get_block_header(self.run_id, camera_id, record.block)
+                        headers[record.block] = self._header(camera_id, record.block)
                     header = headers[record.block]
                 plate = open_with_session_key(record, session_key, header)
                 plates.add(plate)
@@ -321,6 +434,13 @@ class Investigator:
             steps.append(step)
 
         sightings.sort()
+        records_opened = sum(s["records_tested"] for s in steps)
+        if receipt is not None:
+            closing = self.gov.bulletin.publish("closing", self.now, token.token_id, {
+                "wraps_opened": activation["wraps_opened"], "records_opened": records_opened,
+                "plates_exposed": len(plates),
+            })
+            steps[0]["bulletin_closing_seq"] = closing["seq"]
         path = [(node, tick) for tick, node in sightings if tick >= crime.tick]
         paths = [{"plate": crime.plate, "is_criminal": True, "nodes": path, "stopped_by": None}]
         expected = None
@@ -369,8 +489,22 @@ class Investigator:
         if criminal_path:
             first_tick, last_tick = criminal_path[0][1], criminal_path[-1][1]
             skipped = max(0, sum(1 for _, tick in truth if first_tick <= tick <= last_tick) - matching)
+        governance = None
+        if self.gov is not None:
+            checkpoint = self.gov.checkpoint(self.server, self.run_id, self.now)  # the Conselho copies the log head
+            head = self.server.get_audit_head(self.run_id)
+            totals["governance_seconds"] = self.gateway.overhead_seconds
+            governance = {
+                "operator_id": self.operator_id, "now": self.now,
+                "tokens": [token.summary() for token in self.tokens],
+                "log_entries": (head["seq"] if head else 0) - self._log_start,
+                "log_head": head["hash"] if head else None,
+                "denials": self.denials, "declarations": self.declared, "checkpoint": checkpoint,
+                "overhead_seconds": self.gateway.overhead_seconds,
+            }
         return {
             "mode": mode,
+            "governance": governance,
             "steps": steps,
             "paths": paths,
             "totals": totals,

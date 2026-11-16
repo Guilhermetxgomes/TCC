@@ -1,11 +1,13 @@
 import time
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 from cryptography.exceptions import InvalidTag
 
 from crypto import p256, threshold
 from crypto.escrow import unwrap_session_key, wrap_context
+from crypto.tokens import verify_token
+from entities.auth_token import AuthToken
 from entities.session_key_wrap import SessionKeyWrap
 
 
@@ -24,6 +26,11 @@ class Scope:
     sessions: Optional[frozenset] = None    # None = every session of the period
     camera_ids: Optional[frozenset] = None  # None = every camera
     reason: str = ""
+    # The judge's Busca Total token and the receipt of the activation in the public bulletin
+    # (services/bulletin.py). Required only by a committee created with a judge key and a
+    # bulletin; the prototype's tests without governance leave them empty.
+    token: Optional[AuthToken] = field(default=None, compare=False)
+    receipt: Optional[dict] = field(default=None, compare=False)
 
     def covers(self, wrap: SessionKeyWrap) -> bool:
         return (
@@ -36,14 +43,17 @@ class Scope:
 class CommitteeMember:
     """One representative (e.g. a state deputy). Holds one key share per period."""
 
-    def __init__(self, index: int):
+    def __init__(self, index: int, policy: Optional[Callable[[Scope], None]] = None):
         self.index = index
         self._shares: dict[str, threshold.KeyShare] = {}
+        self._policy = policy  # raises PermissionError when the member must refuse
 
     def receive_share(self, period: str, share: threshold.KeyShare) -> None:
         self._shares[period] = share
 
     def partial_decrypt(self, wrap: SessionKeyWrap, scope: Scope) -> threshold.PartialDecryption:
+        if self._policy is not None:
+            self._policy(scope)
         if not scope.covers(wrap):
             raise PermissionError(f"wrap of camera {wrap.camera_id} / {wrap.session} is outside the approved scope")
         return threshold.partial_decrypt(self._shares[wrap.period], p256.decode(wrap.r))
@@ -64,11 +74,41 @@ class EmergencyCommittee:
     on its own device and the keys come from a distributed key generation.
     """
 
-    def __init__(self, threshold_t: int = 4, n_members: int = 8):
+    def __init__(self, threshold_t: int = 4, n_members: int = 8, judge_public_key: Optional[bytes] = None,
+                 bulletin=None):
         self.threshold = threshold_t
-        self.members = {index: CommitteeMember(index) for index in range(1, n_members + 1)}
+        # With a judge key and a bulletin, every member refuses to take part unless the request
+        # carries a valid Busca Total token matching its scope AND the activation was already
+        # published in the bulletin ("publish before decrypt", RNF08).
+        self.judge_public_key = judge_public_key
+        self.bulletin = bulletin
+        policy = self._authorize if judge_public_key is not None and bulletin is not None else None
+        self.members = {index: CommitteeMember(index, policy) for index in range(1, n_members + 1)}
         self._public_keys: dict[str, threshold.PublicKey] = {}
         self.activations: list[dict] = []
+
+    def _authorize(self, scope: Scope) -> None:
+        token = scope.token
+        if token is None or not verify_token(token, self.judge_public_key):
+            raise PermissionError("pedido sem token do Autorizador Legal válido")
+        if token.mode != "total":
+            raise PermissionError(f"token de Busca {token.mode.capitalize()} não autoriza a Busca Total")
+        allowed = token.scope
+        if scope.period != allowed["period"]:
+            raise PermissionError(f"período {scope.period} fora do token ({allowed['period']})")
+        for name, asked in (("sessions", scope.sessions), ("camera_ids", scope.camera_ids)):
+            if allowed[name] is not None and (asked is None or not set(asked) <= set(allowed[name])):
+                raise PermissionError(f"escopo pedido ({name}) maior do que o autorizado no token")
+        if not self.bulletin.contains(scope.receipt, token.token_id):
+            raise PermissionError("ativação não publicada no boletim público: os membros não participam")
+
+    def check_request(self, scope: Scope) -> None:
+        """
+        What each member checks before taking part, run once up front so that a request the
+        members would refuse does not even get the wraps released (PermissionError).
+        """
+        if self.judge_public_key is not None and self.bulletin is not None:
+            self._authorize(scope)
 
     def public_key(self, period: str) -> threshold.PublicKey:
         """Public key of a period (month); cameras encrypt their session keys to it."""
@@ -112,6 +152,7 @@ class EmergencyCommittee:
                 raise
         self.activations.append({
             "at": time.time(), "period": scope.period, "reason": scope.reason, "members": present[: self.threshold],
+            "token_id": scope.token.token_id if scope.token else None,
             "sessions": sorted({session for _, session in session_keys}),
             "cameras": sorted({camera for camera, _ in session_keys}),
             "wraps_opened": len(session_keys), "partial_decryptions": partial_decryptions,

@@ -8,7 +8,9 @@ import sys
 
 from crypto.puzzle import solve_puzzle
 from crypto.signing import verify_record
+from services.auditor import Auditor
 from services.committee import QuorumError
+from simulation import governance_attacks
 from simulation.tampering import forge_attack, move_attack
 from simulation.city_graph import CityGraph
 from simulation.engine import run_simulation
@@ -82,6 +84,7 @@ def run_seed(graph: CityGraph, server, seed: int) -> None:
               for r in server.get_rows_in_session(RUN_ID, crime.node, crime_session(world))),
           "every stored record of the crime camera carries a valid camera signature")
     run_tamper_checks(graph, server, world)
+    run_governance_checks(graph, server, world)
 
     print(f"     crime at camera {crime.node}, tick {crime.tick}; records tested: "
           f"fechada={closed['totals']['records_tested']} aberta={opened['totals']['records_tested']} "
@@ -116,6 +119,33 @@ def run_tamper_checks(graph: CityGraph, server, world) -> None:
         server.update_record(RUN_ID, entry["record_id"], record)
     check(Investigator(graph, server, world).busca_fechada()["truth"]["followed_criminal"],
           "after restoring the record the search follows the criminal again")
+
+
+def run_governance_checks(graph: CityGraph, server, world) -> None:
+    """Tokens, log, bulletin and reconciliation over the searches this seed already ran."""
+    log = server.get_audit_log(RUN_ID)
+    report = Auditor.for_world(world).reconcile(world, server)
+    totals = report["totals"]
+    check(report["chain"]["ok"] and len(log) == totals["log_entries"] > 0,
+          f"the Servidor's log is an intact chain of {len(log)} entries")
+    check(report["ok"], f"honest searches reconcile clean: {totals['tokens']} tokens, {totals['releases']} releases, "
+                        f"{totals['verified']} of {totals['declared']} declarations verified")
+    check(all(e["token_id"] for e in log if e["kind"] in ("release", "release_wraps")), "every release names its token")
+    check(any(e["kind"] == "activation" for e in world.governance.bulletin.entries()),
+          "the Busca Total left a public trace in the bulletin")
+    undo = []
+    for attack in governance_attacks.ATTACKS:
+        result = governance_attacks.run(attack, graph, server, world)
+        if result["undo"]:
+            undo.append(result["undo"])
+        if attack == "offlog_dump":
+            check(not result["checks"][0]["detected"] and not result["checks"][1]["detected"],
+                  "a copy of the database outside the gate leaves no trace in the log (only the puzzle cost remains)")
+        else:
+            check(result["contained"], f"governance attack '{attack}' is caught: "
+                  + ", ".join(c["label"] for c in result["checks"] if c["detected"]))
+    governance_attacks.restore(server, world, undo)
+    check(Auditor.for_world(world).reconcile(world, server)["ok"], "after restoring, the reconciliation is clean again")
 
 
 def run_block_seed(graph: CityGraph, server, seed: int) -> None:
