@@ -9,6 +9,7 @@ No database needed: everything runs in memory on the real crypto code.
     python -m experiments.cap4 e5      # targeted search vs. mass surveillance (extrapolation)
     python -m experiments.cap4 e6      # the same attacks against a conventional backend and the Nêmesis
     python -m experiments.cap4 e7      # real hourly volumes of the São Paulo toll plazas (ARTESP)
+    python -m experiments.cap4 e8      # governance: tokens, chained log, reconciliation, attacks
     python -m experiments.cap4 all
 
 Each experiment writes experiments/resultados/<name>.csv; e3 and e5 also write a
@@ -542,7 +543,100 @@ def plot_e7(means: list[float], profile: list[float], busiest: str) -> None:
     plt.close(fig)
 
 
-EXPERIMENTS = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5, "e6": e6, "e7": e7}
+# ---------------------------------------------------------------------------------------
+# E8 -- governance: tokens, chained log, declarations, reconciliation, attacks
+# ---------------------------------------------------------------------------------------
+
+
+def e8(seed: int = 1, repetitions: int = 300, chain_sizes=(1_000, 10_000, 100_000)) -> None:
+    """Same simulation as the web UI (seed 1, 120 vehicles, N = 1000); in memory, no Postgres."""
+    from crypto import hashchain
+    from crypto.tokens import SigningKey, verify_token
+    from services.auditor import Auditor
+    from services.judge import LegalAuthorizer
+    from simulation import governance_attacks
+    from simulation.city_graph import CityGraph
+    from simulation.engine import run_simulation
+    from simulation.investigation import Investigator
+    from simulation.memory_server import MemoryServer
+
+    # -- unit costs ----------------------------------------------------------------------
+    judge = LegalAuthorizer()
+    now = "2026-01-01T10:00:00+00:00"
+    issue_ms = timed_ms(lambda: judge.issue_fechada("PC-1", "ABC1D23", now), repetitions)
+    token = judge.issued[-1]
+    verify_ms = timed_ms(lambda: verify_token(token, judge.public_key), repetitions)
+    key = SigningKey()
+    head = [None]
+
+    def append():
+        head[0] = hashchain.link(head[0], {"kind": "release", "token_id": token.token_id, "records": 3,
+                                           "detail": {"record_ids": [1, 2, 3]}}, key)
+    append_ms = timed_ms(append, repetitions)
+    rows = [{"operacao": "emitir e assinar um token (juiz)", "ms": f"{issue_ms:.3f}"},
+            {"operacao": "verificar um token (Servidor)", "ms": f"{verify_ms:.3f}"},
+            {"operacao": "encadear e assinar uma entrada do log", "ms": f"{append_ms:.3f}"}]
+    for size in chain_sizes:
+        entries, h = [], None
+        for i in range(size):
+            h = hashchain.link(h, {"kind": "release", "records": i % 7, "detail": {}}, key)
+            entries.append(h)
+        started = time.perf_counter()
+        assert hashchain.verify(entries)["ok"]
+        hash_only = time.perf_counter() - started
+        started = time.perf_counter()
+        assert hashchain.verify(entries, [{"seq": size, "hash": entries[-1]["hash"]}], key.public_key_bytes)["ok"]
+        signed = time.perf_counter() - started
+        rows.append({"operacao": f"verificar cadeia de {size} entradas (só hash)", "ms": f"{hash_only * 1000:.1f}"})
+        rows.append({"operacao": f"verificar cadeia de {size} entradas (hash + assinatura)", "ms": f"{signed * 1000:.1f}"})
+
+    # -- the searches of the web UI, with governance on --------------------------------------
+    graph, server = CityGraph.load(), MemoryServer()
+    world = run_simulation(graph, server, "e8", n_vehicles=120, ticks=240, puzzle_level=1000, crime_tick=60, seed=seed)
+    searches = []
+    for label, run in (("Busca Fechada", lambda i: i.busca_fechada()),
+                       ("Busca Aberta (3 letras)", lambda i: i.busca_aberta(hint_len=3)),
+                       ("Busca Aberta (sem dica)", lambda i: i.busca_aberta(hint_len=0)),
+                       ("Busca Total", lambda i: i.busca_total())):
+        result = run(Investigator(graph, server, world))
+        g, t = result["governance"], result["totals"]
+        searches.append({
+            "busca": label, "tokens": len(g["tokens"]), "entradas_log": g["log_entries"],
+            "registros_liberados": sum(s.get("records_in_window", 0) for s in result["steps"]),
+            "decifragens_declaradas": g["declarations"], "governanca_ms": f"{g['overhead_seconds'] * 1000:.1f}",
+            "busca_ms": f"{t['real_seconds'] * 1000:.1f}",
+            "governanca_por_entrada_ms": f"{g['overhead_seconds'] * 1000 / max(g['log_entries'], 1):.2f}",
+        })
+    auditor = Auditor.for_world(world)
+    started = time.perf_counter()
+    report = auditor.reconcile(world, server)
+    reconcile_ms = (time.perf_counter() - started) * 1000
+    declared = max(report["totals"]["declared"], 1)
+    rows.append({"operacao": f"reconciliar as 4 buscas ({report['totals']['log_entries']} entradas, "
+                             f"{report['totals']['declared']} declarações, {report['totals']['grave']} discrepâncias)",
+                 "ms": f"{reconcile_ms:.1f}"})
+    rows.append({"operacao": "por declaração conferida (aprox., inclui o resto da reconciliação)",
+                 "ms": f"{reconcile_ms / declared:.2f}"})
+    write_csv("e8_governanca_custos", rows)
+    write_csv("e8_governanca_buscas", searches)
+
+    # -- attacks -----------------------------------------------------------------------------
+    attacks_rows, undo = [], []
+    for attack in governance_attacks.ATTACKS:
+        result = governance_attacks.run(attack, graph, server, world)
+        if result["undo"]:
+            undo.append(result["undo"])
+        attacks_rows.append({
+            "ataque": result["title"], "contido": "sim" if result["contained"] else "não",
+            "verificacoes": "; ".join(f"{c['label']}: {'detecta' if c['detected'] else 'não detecta'}"
+                                      for c in result["checks"]),
+            "resumo": result["headline"],
+        })
+    governance_attacks.restore(server, world, undo)
+    write_csv("e8_governanca_ataques", attacks_rows)
+
+
+EXPERIMENTS = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5, "e6": e6, "e7": e7, "e8": e8}
 
 if __name__ == "__main__":
     chosen = sys.argv[1:] or ["all"]

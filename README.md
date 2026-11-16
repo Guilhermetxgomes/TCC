@@ -26,21 +26,25 @@ A Arquitetura 3.0 resolve a vulnerabilidade de exposição da arquitetura (3) ao
 - **Busca Aberta**: o investigador não conhece a placa alvo; decifra todos os registros da janela sob investigação (custo escala com o volume da janela).
 - **Busca Fechada**: o investigador já conhece a placa alvo; itera os registros até encontrar uma correspondência (custo médio menor, pois interrompe cedo).
 - **Busca Total**: exclusiva para acesso excepcional mediado pelo Comitê de Emergência; reconstrói a chave secreta mensal (SK) via quórum para decifrar todos os registros do mês, com escopo e trilha de auditoria restritos a esse período.
+- **Governança**: toda busca exige um *token* do Autorizador Legal (juiz) assinado com ECDSA P-256 (Aberta: câmera e janela; Fechada: HMAC da placa, prazo e orçamento de registros; Total: mês, dias e câmeras). O Servidor verifica o *token* antes de liberar qualquer registro e grava cada liberação ou recusa num log encadeado por hash, cujo último hash o Conselho copia para fora do banco. O investigador declara ao Auditor cada registro que abriu, com a solução *k*, e o Auditor reconcilia tokens × log × declarações. A Busca Total só acontece depois de publicada num boletim público.
 - **BOLO**: a polícia notifica as câmeras de uma lista de placas de interesse (*blocklist*); cada câmera verifica a placa em texto claro no momento da captura e, em caso de correspondência, alerta a polícia diretamente, sem custo de puzzle envolvido.
 
 ## Estrutura do repositório
 
 ```
 crypto/            esquema de crumpling (AES-256-GCM com AD = câmera e instante) e puzzle de prova de trabalho;
-                   assinatura ECDSA dos registros pela câmera (signing);
+                   assinatura ECDSA dos registros pela câmera (signing); tokens de autorização (tokens) e
+                   cadeia de hash do log e do boletim (hashchain);
                    amassamento por bloco (block_crumpling), ElGamal de limiar sobre P-256
                    (p256, threshold) e custódia da chave de sessão para a Busca Total (escrow)
 database/          conexão e migrações do banco (Postgres)
-entities/          Record, Blocklist, BlocklistEntry, Alert, BlockHeader, SessionKeyWrap
-services/          Camera, Police, Server, EmergencyCommittee
+entities/          Record, Blocklist, BlocklistEntry, Alert, BlockHeader, SessionKeyWrap, AuthToken
+services/          Camera, Police, Server, EmergencyCommittee; governança: LegalAuthorizer (judge), CustodyGateway
+                   (custody), AuditLog (audit_log), PublicBulletin (bulletin), Auditor (auditor), Governance
 experiments/cap4.py              experimentos do capítulo de resultados (sem banco); saída em experiments/resultados/
 tests/test_crypto.py             testes do núcleo criptográfico (sem banco, sem pytest)
 tests/test_bolo.py               testes da blocklist do BOLO (difusão, validade e capacidade)
+tests/test_governance.py         testes de tokens, portão do Servidor, log encadeado, boletim, Auditor e ataques
 docs/                            avaliação do texto/código e roteiro do capítulo de resultados
 main.py                          simulação do custo de busca_fechada/busca_aberta sobre um único registro
 main_busca_aberta.py             simulação de busca_aberta sobre um volume de capturas (Server real)
@@ -50,6 +54,7 @@ main_bolo_normal_complexity.py   análise de complexidade temporal e espacial do
 teste_multiplos_registros.py     benchmark de custo (USD) de busca_fechada/busca_aberta em escala
 simulation/                      simulação em grafo (motor de tráfego, investigação, custo) usada pela interface web;
                                  attacks.py (sistema convencional x Nêmesis), tampering.py (adulterações),
+                                 governance_attacks.py (ataques a tokens, log e boletim),
                                  tolls.py e real_search.py (volumes reais das praças de pedágio, ARTESP)
 simulation/data/pedagio_2026_horario.csv.gz  veículos por hora de cada praça e sentido, jan.–set. 2026 (agregado)
 scripts/download_city.py         gera simulation/data/city.json a partir do OpenStreetMap (só necessário uma vez)
@@ -59,11 +64,12 @@ relatorio/                       fonte LaTeX e PDF do relatório (Capítulos 1�
 
 ## Simulação web
 
-A interface tem três telas:
+A interface tem quatro telas:
 
 1. **Busca na Cidade Universitária** (descrita abaixo).
 2. **Ataques: convencional × Nêmesis**: as mesmas capturas carregadas num sistema convencional (placa, câmera e instante em claro, indexados por placa) e no Nêmesis, e quatro ataques do operador do Servidor contra os dois: ler toda a base, seguir um veículo qualquer pela placa, mudar câmera e instante de um registro (álibi falso) e trocar a placa (sumir com o carro do crime). Nos ataques de leitura, os dois sistemas recebem o mesmo tempo; no Nêmesis os puzzles são resolvidos de verdade e o custo completo é extrapolado. As adulterações são detectadas pelo dado associado e pela assinatura da câmera.
 3. **Dados reais de tráfego**: volumes horários das 365 praças e sentidos das rodovias estaduais concedidas de SP (ARTESP, 2026). Gráficos por hora, por dia e por praça, e uma busca dimensionada pelo volume real: um registro cifrado e assinado para cada veículo que passou na janela, com os puzzles resolvidos e o custo extrapolado.
+4. **Auditoria**: tokens emitidos pelo juiz, log de decodificação do Servidor (com o hash de cada entrada e os checkpoints do Conselho), boletim público da Busca Total, reconciliação do Auditor (autorizado × liberado × declarado, com as discrepâncias) e volume por operador e mês. Dez ataques à governança: token vencido, fora do escopo, de outro operador, com orçamento esgotado ou adulterado; operador do Servidor apagando ou reescrevendo o log; token usado para seguir outra pessoa; Busca Total sem publicação; e a cópia do banco por fora do portão, que a governança não vê e só o custo do puzzle contém.
 
 ### Tela 1: busca em grafo
 
@@ -86,12 +92,13 @@ python -m simulation.selfcheck             # verificação sem interface
 python -m simulation.selfcheck --memory    # idem, sem Postgres (servidor em memória)
 python -m tests.test_crypto                # núcleo criptográfico
 python -m tests.test_bolo                  # blocklist do BOLO
+python -m tests.test_governance            # tokens, log, boletim, Auditor e ataques
 python -m experiments.cap4 all             # experimentos do capítulo de resultados
 python -m simulation.tolls build ~/Downloads/volume_horario_2026   # regera o agregado de pedágio (precisa de pandas)
 ```
 
 O grafo já vem em `simulation/data/city.json`. Para regerá-lo: `pip install -r requirements-osm.txt && python scripts/download_city.py`.
-Bancos já inicializados recebem a coluna `run_id` e as tabelas de blocos e de custódia automaticamente (`Server.ensure_schema()`); as migrations `002_add_run_id.sql`, `003_blocks_and_escrow.sql` e `004_record_signature.sql` cobrem bancos novos.
+Bancos já inicializados recebem a coluna `run_id` e as tabelas de blocos e de custódia automaticamente (`Server.ensure_schema()`); as migrations `002_add_run_id.sql`, `003_blocks_and_escrow.sql`, `004_record_signature.sql` e `005_audit_log.sql` cobrem bancos novos.
 
 O código implementa e valida experimentalmente os conceitos de *crumpling*, puzzle de prova de trabalho e busca aberta/fechada descritos no relatório, além do fluxo BOLO (Seção 3.1) integrado à câmera.
 
