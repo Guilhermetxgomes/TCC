@@ -285,13 +285,16 @@
       </div>
     </section>
 
-    <div class="audit-grid">
-      <section class="card">
-        <h2>Reconciliação do Auditor</h2>
-        <p class="muted small">Cruza o <strong>autorizado</strong> (tokens do juiz), o <strong>liberado</strong> (log do Servidor,
-          conferido contra os checkpoints do Conselho) e o <strong>declarado</strong> (decifragens informadas pelo investigador).</p>
-        <div id="g-verdict" class="verdict-box muted small">Gere uma simulação e rode uma busca.</div>
-      </section>
+    <section class="card">
+      <h2>Reconciliação do Auditor</h2>
+      <p class="muted small">Cruza o <strong>autorizado</strong> (tokens do juiz), o <strong>liberado</strong> (log do Servidor,
+        conferido contra os checkpoints do Conselho) e o <strong>declarado</strong> (decifragens informadas pelo investigador).</p>
+      <div id="g-verdict" class="verdict-box muted small">Gere uma simulação e rode uma busca.</div>
+    </section>
+
+    <!-- Ataques à governança: fora do escopo da implementação (TCC). O painel fica oculto; o código
+         continua em simulation/governance_attacks.py e /api/audit/attack. -->
+    <div id="g-attacks" hidden>
       <section class="card">
         <h2>Ataques à governança</h2>
         <div class="grid">
