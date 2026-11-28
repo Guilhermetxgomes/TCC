@@ -620,7 +620,7 @@ async function showVertex(nodeId, offset) {
 
 // ---------- views (tabs) ----------
 
-const VIEWS = ["busca", "ataques", "dados", "auditoria"];
+const VIEWS = ["busca", "ataques", "auditoria"];
 const viewHooks = {}; // view name -> function called when the view is shown
 
 function showView(name) {
