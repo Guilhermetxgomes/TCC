@@ -7,10 +7,14 @@ No database needed: everything runs in memory on the real crypto code.
     python -m experiments.cap4 e3      # window cost vs. camera volume: per record, per block, two-level
     python -m experiments.cap4 e4      # Busca Total: cost of the committee operations
     python -m experiments.cap4 e5      # targeted search vs. mass surveillance (extrapolation)
+    python -m experiments.cap4 e5 python_us=2.7 native_us=0.2172   # e5 with the reference u of the text
     python -m experiments.cap4 e6      # the same attacks against a conventional backend and the Nêmesis
     python -m experiments.cap4 e7      # real hourly volumes of the São Paulo toll plazas (ARTESP)
     python -m experiments.cap4 e8      # governance: tokens, chained log, reconciliation, attacks
     python -m experiments.cap4 all
+
+Arguments of the form key=value are passed to the chosen experiments (numbers are
+parsed as int or float).
 
 Each experiment writes experiments/resultados/<name>.csv; e3 and e5 also write a
 .png when matplotlib is installed. Measured numbers depend on the machine and on
@@ -355,21 +359,35 @@ def openssl_rate(algorithm: str, block_bytes: int):
         return None
 
 
-def e5(cameras: int = 5000, vehicles_per_hour: int = 1000, hours: int = 24 * 365) -> None:
+def e5(cameras: int = 5000, vehicles_per_hour: int = 1000, hours: int = 24 * 365,
+       targeted_vehicles_per_hour: int = 2300, python_us: float | None = None,
+       native_us: float | None = None) -> None:
     """
-    cameras / vehicles_per_hour are WORKING ASSUMPTIONS (not validated against CET data).
+    Targeted search: a Busca Fechada over 1 hour of one camera on a main road at peak time,
+    with targeted_vehicles_per_hour = 2300 records, the median of the CET counts (MSVP 2019).
+    Mass surveillance: every record of a hypothetical urban network of `cameras` cameras with
+    an AVERAGE of vehicles_per_hour records over the whole day (local streets and off-peak
+    hours included), for `hours` hours. cameras / vehicles_per_hour are WORKING ASSUMPTIONS.
     A rational adversary scans k sequentially, so each puzzle costs N/2 attempts on average.
+
+    python_us / native_us (microseconds per attempt) replace the values measured on this
+    machine, so the figure can be drawn with the reference values used in the text.
     """
-    python_spa = seconds_per_attempt()
-    profiles = [("python_medido", python_spa)]
-    sha, gcm = openssl_rate("sha256", 64), openssl_rate("aes-256-gcm", 16)
-    if sha and gcm:
-        # Lower bound on a native attempt: one SHA-256 block + one small AES-GCM operation
-        # (ignores the AES key schedule), i.e. an optimistic adversary on this same CPU.
-        profiles.append(("nativo_estimado_openssl", 1 / sha + 1 / gcm))
-        print(f"   openssl speed: sha256(64 B) = {sha:,.0f}/s, aes-256-gcm(16 B) = {gcm:,.0f}/s")
+    if python_us is None:
+        profiles = [("python_medido", seconds_per_attempt())]
+    else:
+        profiles = [("python_referencia", python_us / 1e6)]
+    if native_us is None:
+        sha, gcm = openssl_rate("sha256", 64), openssl_rate("aes-256-gcm", 16)
+        if sha and gcm:
+            # Lower bound on a native attempt: one SHA-256 block + one small AES-GCM operation
+            # (ignores the AES key schedule), i.e. an optimistic adversary on this same CPU.
+            profiles.append(("nativo_estimado_openssl", 1 / sha + 1 / gcm))
+            print(f"   openssl speed: sha256(64 B) = {sha:,.0f}/s, aes-256-gcm(16 B) = {gcm:,.0f}/s")
+    else:
+        profiles.append(("nativo_referencia", native_us / 1e6))
     usd_per_core_second = AWS_HOURLY_PRICE_USD / AWS_VCPUS / 3600
-    targeted_records = (vehicles_per_hour + 1) / 2  # busca fechada, 1 camera x 1 hour
+    targeted_records = (targeted_vehicles_per_hour + 1) / 2  # busca fechada, 1 camera x 1 hour
     mass_records = cameras * vehicles_per_hour * hours
     rows = []
     for profile, spa in profiles:
@@ -386,12 +404,13 @@ def e5(cameras: int = 5000, vehicles_per_hour: int = 1000, hours: int = 24 * 365
                 "massa_1ano_usd": f"{mass * spa * usd_per_core_second:.3e}",
             })
     write_csv("e5_dirigida_vs_massa", rows)
-    print(f"   hipóteses: {cameras} câmeras x {vehicles_per_hour} veículos/h x {hours} h = {mass_records:.3e} registros; "
+    print(f"   busca fechada: 1 câmera x 1 h x {targeted_vehicles_per_hour} veículos/h (mediana CET, via principal no pico)")
+    print(f"   hipóteses: {cameras} câmeras x {vehicles_per_hour} veículos/h em média x {hours} h = {mass_records:.3e} registros; "
           f"US$ {AWS_HOURLY_PRICE_USD}/h por instância de {AWS_VCPUS} vCPUs, usando todas as vCPUs")
-    plot_e5(rows)
+    plot_e5(rows, targeted_vehicles_per_hour, cameras)
 
 
-def plot_e5(rows: list[dict]) -> None:
+def plot_e5(rows: list[dict], targeted_vehicles_per_hour: int = 2300, cameras: int = 5000) -> None:
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -407,13 +426,16 @@ def plot_e5(rows: list[dict]) -> None:
         points = [row for row in rows if row["perfil"] == profile]
         xs = [row["N"] for row in points]
         ax.plot(xs, [float(row["busca_fechada_1h_usd"]) for row in points], "-o", color="#2a78d6", linewidth=2,
-                markersize=5, label="busca fechada: 1 câmera, 1 h")
+                markersize=5, label=f"busca fechada: 1 câmera, 1 h, n = {targeted_vehicles_per_hour}")
         ax.plot(xs, [float(row["massa_1ano_usd"]) for row in points], "--s", color="#eb6834", linewidth=2,
-                markersize=5, label="varredura: todas as câmeras, 1 ano")
+                markersize=5, label=f"varredura: {cameras} câmeras, 1 ano")
         ax.set_xscale("log")
         ax.set_yscale("log")
         ax.set_xlabel("N (tamanho do puzzle por registro)")
-        ax.set_title(profile.replace("_", " "), fontsize=9, loc="left")
+        names = {"python_medido": "protótipo em Python (medido)", "python_referencia": "protótipo em Python",
+                 "nativo_estimado_openssl": "implementação nativa (estimada)", "nativo_referencia": "implementação nativa"}
+        us = f"{points[0]['us_por_tentativa']:g}".replace(".", ",")
+        ax.set_title(f"{names.get(profile, profile)}, u = {us} µs", fontsize=9, loc="left")
         ax.grid(True, which="major", linewidth=0.6)
     axes[0][0].set_ylabel("custo de computação (US$)")
     axes[0][0].legend(frameon=False, loc="center left", fontsize=8)
@@ -639,8 +661,20 @@ def e8(seed: int = 1, repetitions: int = 300, chain_sizes=(1_000, 10_000, 100_00
 
 EXPERIMENTS = {"e1": e1, "e2": e2, "e3": e3, "e4": e4, "e5": e5, "e6": e6, "e7": e7, "e8": e8}
 
+def _parse_value(text: str):
+    for cast in (int, float):
+        try:
+            return cast(text)
+        except ValueError:
+            pass
+    return text
+
+
 if __name__ == "__main__":
-    chosen = sys.argv[1:] or ["all"]
+    args = sys.argv[1:]
+    params = dict(arg.split("=", 1) for arg in args if "=" in arg)
+    params = {key: _parse_value(value) for key, value in params.items()}
+    chosen = [arg for arg in args if "=" not in arg] or ["all"]
     for name in (EXPERIMENTS if chosen == ["all"] else chosen):
         print(f"=== {name} ===")
-        EXPERIMENTS[name]()
+        EXPERIMENTS[name](**params)
