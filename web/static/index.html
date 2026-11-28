@@ -12,8 +12,7 @@
     <nav class="tabs" role="tablist" aria-label="Telas">
       <a href="#busca" class="tab" role="tab" data-view="busca">1 · Busca na Cidade Universitária</a>
       <a href="#ataques" class="tab" role="tab" data-view="ataques">2 · Ataques: convencional × Nêmesis</a>
-      <a href="#dados" class="tab" role="tab" data-view="dados">3 · Dados reais de tráfego</a>
-      <a href="#auditoria" class="tab" role="tab" data-view="auditoria">4 · Auditoria</a>
+      <a href="#auditoria" class="tab" role="tab" data-view="auditoria">3 · Auditoria</a>
     </nav>
   </header>
 
@@ -217,60 +216,6 @@
     </section>
   </section>
 
-  <section id="view-dados" class="view page" hidden>
-    <section class="card">
-      <h2>Volume real nas praças de pedágio de São Paulo</h2>
-      <p class="small">Cada praça de pedágio, em cada sentido, faz o papel de uma câmera do Nêmesis: o número de veículos que
-        passou nela numa hora é o <em>n</em> de uma janela de busca. <span id="d-source" class="muted"></span></p>
-      <div class="tiles" id="d-tiles"></div>
-    </section>
-    <div class="dados-grid">
-      <section class="card">
-        <h2>Busca com volume real</h2>
-        <div class="grid">
-          <label class="wide">lote (concessão) <select id="d-lot"></select></label>
-          <label class="wide">praça e sentido <select id="d-camera"></select></label>
-          <label>dia <input id="d-day" type="date" value="2026-03-10"></label>
-          <label>hora inicial <input id="d-hour" type="number" value="17" min="0" max="23"></label>
-          <label>janela (horas) <input id="d-hours" type="number" value="1" min="1" max="6"></label>
-          <label title="N usado de fato para cifrar e resolver os puzzles nesta execução.">N real (executado) <input id="d-demo-n" type="number" value="100" min="2" max="1000"></label>
-          <label class="wide" title="Os custos abaixo são extrapolados para este N com o tempo por tentativa medido.">N realista (extrapolação)
-            <select id="d-realistic">
-              <option value="1000000">10⁶</option><option value="10000000" selected>10⁷</option>
-              <option value="100000000">10⁸</option><option value="1000000000">10⁹</option>
-            </select>
-          </label>
-        </div>
-        <button id="d-search" type="button" class="primary" disabled>Buscar com volume real</button>
-        <p id="d-note" class="muted small">Gera, cifra e assina um registro para cada veículo que passou na janela (até 3.000; acima disso,
-          usa uma amostra e escala) e resolve os <em>puzzles</em> de verdade.</p>
-        <div id="d-result" hidden>
-          <dl class="stats" id="d-stats"></dl>
-          <div class="table-wrap">
-            <table class="summary">
-              <thead><tr><th>o que se abre</th><th>registros</th><th>tempo (1 núcleo)</th><th>custo AWS</th></tr></thead>
-              <tbody id="d-costs"></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-      <section class="card chart-card">
-        <h2 id="d-day-title">Veículos por hora no dia</h2>
-        <div class="viz-legend"><span><i class="sw s1"></i>veículos no dia</span><span><i class="sw s2 line"></i>média do período na mesma hora</span><span><i class="sw win"></i>janela da busca</span></div>
-        <div id="d-chart-day" class="chart"></div>
-        <h2 id="d-period-title">Veículos por dia, janeiro a setembro de 2026</h2>
-        <p class="muted small">Clique num dia para selecioná-lo.</p>
-        <div id="d-chart-period" class="chart"></div>
-      </section>
-      <section class="card chart-card wide-card">
-        <h2>Volume médio por hora de cada praça (365 praças e sentidos)</h2>
-        <p class="muted small">Barras em ordem decrescente; a linha tracejada é a hipótese de trabalho de 1.000 veículos por hora
-          por câmera. A praça selecionada aparece destacada; clique numa barra para selecioná-la.</p>
-        <div id="d-chart-rank" class="chart"></div>
-      </section>
-    </div>
-  </section>
-
   <section id="view-auditoria" class="view page" hidden>
     <section class="card">
       <h2>Governança: tokens, log de decodificação e reconciliação</h2>
@@ -285,13 +230,16 @@
       </div>
     </section>
 
-    <div class="audit-grid">
-      <section class="card">
-        <h2>Reconciliação do Auditor</h2>
-        <p class="muted small">Cruza o <strong>autorizado</strong> (tokens do juiz), o <strong>liberado</strong> (log do Servidor,
-          conferido contra os checkpoints do Conselho) e o <strong>declarado</strong> (decifragens informadas pelo investigador).</p>
-        <div id="g-verdict" class="verdict-box muted small">Gere uma simulação e rode uma busca.</div>
-      </section>
+    <section class="card">
+      <h2>Reconciliação do Auditor</h2>
+      <p class="muted small">Cruza o <strong>autorizado</strong> (tokens do juiz), o <strong>liberado</strong> (log do Servidor,
+        conferido contra os checkpoints do Conselho) e o <strong>declarado</strong> (decifragens informadas pelo investigador).</p>
+      <div id="g-verdict" class="verdict-box muted small">Gere uma simulação e rode uma busca.</div>
+    </section>
+
+    <!-- Ataques à governança: fora do escopo da implementação (TCC). O painel fica oculto; o código
+         continua em simulation/governance_attacks.py e /api/audit/attack. -->
+    <div id="g-attacks" hidden>
       <section class="card">
         <h2>Ataques à governança</h2>
         <div class="grid">
@@ -374,7 +322,6 @@
   <script src="/static/charts.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/attacks.js"></script>
-  <script src="/static/dados.js"></script>
   <script src="/static/auditoria.js"></script>
 </body>
 </html>
